@@ -6,6 +6,15 @@ const fs = require('fs');
 const path = require('path');
 const pdfParse = require('pdf-parse');
 const sharp = require('sharp');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const { v4: uuidv4 } = require('uuid');
+const execFileAsync = promisify(execFile);
+
+// In-memory cache for rendered pages (prevents race conditions)
+const renderCache = new Map();
+const CACHE_MAX_SIZE = 100;
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 // Image storage directory
 const IMAGES_DIR = path.join(__dirname, '..', 'data', 'images');
@@ -167,7 +176,7 @@ function chunkText(text, options = {}) {
 }
 
 /**
- * Split text into chunks with page number tracking
+ * Split text into chunks with page number tracking (token-based)
  * @param {Array<{page: number, text: string}>} pageTexts - Text per page
  * @param {object} options - Chunking options
  * @returns {Array<{content: string, index: number, tokenCount: number, pageNumber: number, startPage: number, endPage: number}>}
@@ -247,6 +256,42 @@ function chunkTextWithPages(pageTexts, options = {}) {
 }
 
 /**
+ * Create one chunk per PDF page for accurate page number tracking
+ * @param {Array<{page: number, text: string}>} pageTexts - Text per page
+ * @param {object} options - Chunking options
+ * @returns {Array<{content: string, index: number, tokenCount: number, pageNumber: number, startPage: number, endPage: number}>}
+ */
+function chunkByPages(pageTexts, options = {}) {
+  const minContentLength = options.minContentLength || 50; // Skip near-empty pages
+
+  const chunks = [];
+  let chunkIndex = 0;
+
+  for (const pageData of pageTexts) {
+    const content = cleanText(pageData.text);
+
+    // Skip pages with insufficient content
+    if (content.length < minContentLength) {
+      console.log(`Skipping page ${pageData.page} - insufficient content (${content.length} chars)`);
+      continue;
+    }
+
+    chunks.push({
+      content: content,
+      index: chunkIndex,
+      tokenCount: estimateTokens(content),
+      pageNumber: pageData.page,
+      startPage: pageData.page,
+      endPage: pageData.page
+    });
+
+    chunkIndex++;
+  }
+
+  return chunks;
+}
+
+/**
  * Process a PDF document - extract and chunk with page tracking
  * @param {string} filePath - Path to PDF
  * @param {string} docId - Document ID
@@ -257,13 +302,13 @@ async function processDocument(filePath, docId, options = {}) {
   // Extract text with page-level tracking
   const extracted = await extractTextFromPDF(filePath);
 
-  // Use page-aware chunking if we have page texts
+  // Use page-based chunking (one chunk per page) for accurate page numbers
   let chunks;
   if (extracted.pageTexts && extracted.pageTexts.length > 0) {
-    chunks = chunkTextWithPages(extracted.pageTexts, options);
-    console.log(`Chunked document with page tracking: ${chunks.length} chunks across ${extracted.numPages} pages`);
+    chunks = chunkByPages(extracted.pageTexts, options);
+    console.log(`Chunked document by page: ${chunks.length} chunks from ${extracted.numPages} pages`);
   } else {
-    // Fallback to regular chunking
+    // Fallback to regular chunking if page texts not available
     chunks = chunkText(extracted.text, options);
   }
 
@@ -336,39 +381,109 @@ function deleteStoredPDF(docId) {
 }
 
 /**
- * Render a specific page from a stored PDF as an image
+ * Render a specific page from a stored PDF as an image using pdftoppm
+ * Uses in-memory caching to prevent race conditions and improve performance
  * @param {string} docId - Document ID
  * @param {number} pageNumber - Page number (1-based)
  * @returns {Promise<Buffer>} - PNG image buffer
  */
 async function renderPDFPage(docId, pageNumber) {
+  const cacheKey = `${docId}_${pageNumber}`;
+
+  // Check cache first
+  const cached = renderCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    console.log(`Cache hit for ${cacheKey}`);
+    return cached.buffer;
+  }
+
   const pdfPath = getStoredPDFPath(docId);
   if (!pdfPath) {
     throw new Error(`PDF not found for document: ${docId}`);
   }
 
-  // Dynamic import for ES module
-  const { pdf } = await import('pdf-to-img');
+  // Check for pdftoppm in common locations
+  const pdftoppmPaths = [
+    'pdftoppm',
+    'C:\\poppler\\poppler-25.12.0\\Library\\bin\\pdftoppm.exe',
+    'C:\\poppler\\Library\\bin\\pdftoppm.exe',
+  ];
 
-  const document = await pdf(pdfPath, { scale: 2.0 });
-
-  if (pageNumber < 1 || pageNumber > document.length) {
-    throw new Error(`Page ${pageNumber} out of range (1-${document.length})`);
-  }
-
-  let currentPage = 0;
-  for await (const pageImage of document) {
-    currentPage++;
-    if (currentPage === pageNumber) {
-      // Optimize the image with sharp
-      return await sharp(pageImage)
-        .resize(1400, 1800, { fit: 'inside', withoutEnlargement: true })
-        .png({ compressionLevel: 6 })
-        .toBuffer();
+  let pdftoppmPath = null;
+  for (const p of pdftoppmPaths) {
+    try {
+      await execFileAsync(p, ['-v']);
+      pdftoppmPath = p;
+      break;
+    } catch (e) {
+      // Try next path
     }
   }
 
-  throw new Error(`Failed to render page ${pageNumber}`);
+  let imageBuffer;
+
+  if (pdftoppmPath) {
+    const tempDir = path.join(__dirname, '..', 'data', 'temp');
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+    }
+    // Use UUID instead of Date.now() to prevent collisions
+    const tempBase = path.join(tempDir, `render_${uuidv4()}`);
+    const tempFile = tempBase + '.png';
+
+    try {
+      await execFileAsync(pdftoppmPath, [
+        '-f', String(pageNumber),
+        '-l', String(pageNumber),
+        '-png',
+        '-r', '150',
+        '-singlefile',
+        pdfPath,
+        tempBase
+      ], { maxBuffer: 50 * 1024 * 1024 });
+
+      imageBuffer = fs.readFileSync(tempFile);
+      fs.unlinkSync(tempFile);
+
+      imageBuffer = await sharp(imageBuffer)
+        .resize(1400, 1800, { fit: 'inside', withoutEnlargement: true })
+        .png({ compressionLevel: 6 })
+        .toBuffer();
+    } catch (err) {
+      if (fs.existsSync(tempFile)) {
+        fs.unlinkSync(tempFile);
+      }
+      console.warn('pdftoppm execution failed:', err.message);
+      imageBuffer = null; // Fall through to fallback
+    }
+  }
+
+  // Fallback to pdf-to-img if pdftoppm not available or failed
+  if (!imageBuffer) {
+    console.log('Using pdf-to-img fallback for page rendering');
+    const { pdf } = await import('pdf-to-img');
+    const document = await pdf(pdfPath, { scale: 2.0 });
+
+    if (pageNumber < 1 || pageNumber > document.length) {
+      throw new Error(`Page ${pageNumber} out of range (1-${document.length})`);
+    }
+
+    const pageImage = await document.getPage(pageNumber);
+
+    imageBuffer = await sharp(pageImage)
+      .resize(1400, 1800, { fit: 'inside', withoutEnlargement: true })
+      .png({ compressionLevel: 6 })
+      .toBuffer();
+  }
+
+  // Store in cache (evict oldest if full)
+  if (renderCache.size >= CACHE_MAX_SIZE) {
+    const oldestKey = renderCache.keys().next().value;
+    renderCache.delete(oldestKey);
+  }
+  renderCache.set(cacheKey, { buffer: imageBuffer, timestamp: Date.now() });
+
+  return imageBuffer;
 }
 
 /**
@@ -509,6 +624,7 @@ module.exports = {
   cleanText,
   chunkText,
   chunkTextWithPages,
+  chunkByPages,
   processDocument,
   deleteFile,
   estimateTokens,
