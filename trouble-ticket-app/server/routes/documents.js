@@ -1,6 +1,6 @@
 /**
  * Document Management API routes
- * Handles document upload, processing, and vector storage
+ * Handles document upload, processing, vector storage, and image extraction
  */
 const express = require('express');
 const router = express.Router();
@@ -15,6 +15,7 @@ const googleSheets = require('../services/googleSheets');
 /**
  * POST /api/documents/upload
  * Upload and process a PDF document
+ * Text is extracted with page numbers for on-demand page rendering
  * Requires admin role
  */
 router.post('/upload',
@@ -37,7 +38,7 @@ router.post('/upload',
 
       const docId = `doc_${uuidv4().slice(0, 8)}`;
 
-      // Process the PDF
+      // Process the PDF (text extraction with page tracking)
       console.log(`Processing document: ${req.file.originalname} for application: ${application}`);
       const result = await documentService.processDocument(filePath, docId, { application });
 
@@ -47,9 +48,13 @@ router.post('/upload',
         application: application
       }));
 
-      // Store chunks in vector database
-      console.log(`Storing ${chunksWithApp.length} chunks in vector database`);
-      await vectorService.addChunks(chunksWithApp);
+      // Store text chunks in vector database (includes page numbers)
+      console.log(`Storing ${chunksWithApp.length} text chunks in vector database`);
+      await vectorService.addChunks(chunksWithApp, 'text');
+
+      // Keep the PDF file for on-demand page rendering
+      documentService.keepPDFFile(filePath, docId);
+      console.log(`Stored PDF for on-demand rendering: ${docId}`);
 
       // Save document metadata to Google Sheets
       await googleSheets.addDocument({
@@ -60,11 +65,12 @@ router.post('/upload',
         upload_date: new Date().toISOString(),
         status: 'processed',
         chunk_count: result.chunks.length,
+        image_count: 0, // No longer extracting images
         file_size: req.file.size,
         num_pages: result.metadata.numPages
       });
 
-      // Clean up uploaded file
+      // Clean up the temp uploaded file (we've copied it to documents folder)
       documentService.deleteFile(filePath);
 
       res.json({
@@ -133,7 +139,7 @@ router.get('/:docId', requireRole('admin'), async (req, res) => {
 
 /**
  * DELETE /api/documents/:docId
- * Delete a document and its vectors
+ * Delete a document, its vectors, stored PDF, and any legacy images
  * Requires admin role
  */
 router.delete('/:docId', requireRole('admin'), async (req, res) => {
@@ -143,6 +149,12 @@ router.delete('/:docId', requireRole('admin'), async (req, res) => {
     // Delete from vector database
     await vectorService.deleteDocument(docId);
 
+    // Delete stored PDF
+    documentService.deleteStoredPDF(docId);
+
+    // Delete any legacy extracted images
+    documentService.deleteDocumentImages(docId);
+
     // Delete from Google Sheets
     const deleted = await googleSheets.deleteDocument(docId);
 
@@ -150,10 +162,47 @@ router.delete('/:docId', requireRole('admin'), async (req, res) => {
       return res.status(404).json({ error: 'Document not found' });
     }
 
-    res.json({ success: true, message: 'Document deleted' });
+    res.json({ success: true, message: 'Document deleted successfully' });
   } catch (error) {
     console.error('Delete document error:', error);
     res.status(500).json({ error: 'Failed to delete document' });
+  }
+});
+
+/**
+ * GET /api/documents/:docId/page/:pageNum
+ * Render a specific PDF page as an image (on-demand)
+ * Public endpoint for displaying pages in chat
+ */
+router.get('/:docId/page/:pageNum', async (req, res) => {
+  try {
+    const { docId, pageNum } = req.params;
+    const pageNumber = parseInt(pageNum, 10);
+
+    if (isNaN(pageNumber) || pageNumber < 1) {
+      return res.status(400).json({ error: 'Invalid page number' });
+    }
+
+    // Validate docId format
+    if (!docId.match(/^doc_[a-z0-9-]+$/)) {
+      return res.status(400).json({ error: 'Invalid document ID format' });
+    }
+
+    console.log(`Rendering page ${pageNumber} for document ${docId}`);
+    const imageBuffer = await documentService.renderPDFPage(docId, pageNumber);
+
+    res.set('Content-Type', 'image/png');
+    res.set('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
+    res.send(imageBuffer);
+  } catch (error) {
+    console.error('Page render error:', error);
+    if (error.message.includes('not found')) {
+      return res.status(404).json({ error: error.message });
+    }
+    if (error.message.includes('out of range')) {
+      return res.status(400).json({ error: error.message });
+    }
+    res.status(500).json({ error: 'Failed to render page' });
   }
 });
 
@@ -198,13 +247,70 @@ router.get('/stats/summary', requireRole('admin'), async (req, res) => {
     const stats = await vectorService.getStats();
     const documents = await googleSheets.getAllDocuments();
 
+    // Count total pages across all documents
+    const totalPages = documents.reduce((sum, doc) => sum + (parseInt(doc.num_pages) || 0), 0);
+
     res.json({
       ...stats,
-      documentCount: documents.length
+      documentCount: documents.length,
+      totalPages: totalPages
     });
   } catch (error) {
     console.error('Stats error:', error);
     res.status(500).json({ error: 'Failed to get statistics' });
+  }
+});
+
+/**
+ * GET /api/documents/images/:filename
+ * Serve an extracted image file
+ * Public endpoint for displaying images in chat
+ */
+router.get('/images/:filename', (req, res) => {
+  try {
+    const { filename } = req.params;
+
+    // Security: validate filename format to prevent path traversal
+    if (!filename.match(/^doc_[a-z0-9-]+_p\d+_i\d+\.png$/)) {
+      return res.status(400).json({ error: 'Invalid filename format' });
+    }
+
+    const imagesDir = documentService.getImagesDirectory();
+    const imagePath = path.join(imagesDir, filename);
+
+    // Check if file exists
+    const fs = require('fs');
+    if (!fs.existsSync(imagePath)) {
+      return res.status(404).json({ error: 'Image not found' });
+    }
+
+    // Serve the image
+    res.sendFile(imagePath);
+  } catch (error) {
+    console.error('Image serve error:', error);
+    res.status(500).json({ error: 'Failed to serve image' });
+  }
+});
+
+/**
+ * GET /api/documents/:docId/images
+ * Get all images for a document
+ * Requires admin role
+ */
+router.get('/:docId/images', requireRole('admin'), async (req, res) => {
+  try {
+    const { docId } = req.params;
+
+    const images = documentService.getDocumentImages(docId);
+    const imageUrls = images.map(img => ({
+      filename: img.filename,
+      url: `/api/documents/images/${img.filename}`
+    }));
+
+    res.json(imageUrls);
+  } catch (error) {
+    console.error('Get document images error:', error);
+    res.status(500).json({ error: 'Failed to get document images' });
   }
 });
 

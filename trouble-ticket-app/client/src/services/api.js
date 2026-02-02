@@ -178,6 +178,19 @@ export const settingsApi = {
       headers: getAuthHeaders(),
       body: JSON.stringify(settings)
     });
+  },
+
+  // Image extraction settings
+  getImageExtractionSettings: async () => {
+    return fetchApi('/settings/image-extraction', { headers: getAuthHeaders() });
+  },
+
+  updateImageExtractionSettings: async (settings) => {
+    return fetchApi('/settings/image-extraction', {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(settings)
+    });
   }
 };
 
@@ -270,6 +283,20 @@ export const documentsApi = {
 
   getStats: async () => {
     return fetchApi('/documents/stats/summary', { headers: getAuthHeaders() });
+  },
+
+  getDocumentImages: async (docId) => {
+    return fetchApi(`/documents/${docId}/images`, { headers: getAuthHeaders() });
+  },
+
+  // Helper to get image URL (legacy)
+  getImageUrl: (filename) => {
+    return `${API_BASE}/documents/images/${filename}`;
+  },
+
+  // Helper to get page render URL
+  getPageUrl: (docId, pageNumber) => {
+    return `${API_BASE}/documents/${docId}/page/${pageNumber}`;
   }
 };
 

@@ -30,6 +30,7 @@ const UserChat = () => {
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [showSidebar, setShowSidebar] = useState(false);
+  const [pageViewer, setPageViewer] = useState(null); // { docId, pageNumber, pageUrl, isLoading }
   const messagesEndRef = useRef(null);
 
   // Scroll to bottom when messages change
@@ -75,7 +76,8 @@ const UserChat = () => {
         content: response.response,
         timestamp: new Date().toISOString(),
         ticket: response.ticket || null,
-        status: response.status || null
+        status: response.status || null,
+        relatedPages: response.relatedPages || null
       };
       setMessages(prev => [...prev, aiMessage]);
 
@@ -119,6 +121,33 @@ const UserChat = () => {
   const handleStarterClick = (text) => {
     setInputValue(text);
   };
+
+  // Open page viewer modal
+  const handleViewPage = (page) => {
+    setPageViewer({
+      docId: page.docId,
+      pageNumber: page.pageNumber,
+      pageUrl: page.pageUrl,
+      application: page.application,
+      isLoading: true
+    });
+  };
+
+  // Close page viewer modal
+  const handleClosePageViewer = () => {
+    setPageViewer(null);
+  };
+
+  // Handle Escape key to close modal
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape' && pageViewer) {
+        handleClosePageViewer();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [pageViewer]);
 
   const handleNewChat = () => {
     newSession();
@@ -258,6 +287,29 @@ const UserChat = () => {
               {messages.map((msg, index) => (
                 <div key={index} className={`message-bubble ${msg.sender}`}>
                   <div className="message-content">{msg.content}</div>
+                  {msg.relatedPages && msg.relatedPages.length > 0 && (
+                    <div className="related-pages">
+                      <div className="related-pages-header">Related Documentation:</div>
+                      <div className="related-pages-list">
+                        {msg.relatedPages.slice(0, 3).map((page, pageIdx) => (
+                          <button
+                            key={pageIdx}
+                            className="view-page-btn"
+                            onClick={() => handleViewPage(page)}
+                            title={`View page ${page.pageNumber} from ${page.source || page.application}`}
+                          >
+                            <span className="page-icon">📄</span>
+                            <span className="page-info">
+                              <span className="page-number">Page {page.pageNumber}</span>
+                              {page.application && (
+                                <span className="page-source">{page.application}</span>
+                              )}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   {msg.ticket && (
                     <div className="ticket-badge">
                       🎫 Ticket {msg.ticket.ticket_id} created
@@ -296,6 +348,42 @@ const UserChat = () => {
           </button>
         </div>
       </div>
+
+      {/* Page Viewer Modal */}
+      {pageViewer && (
+        <div className="page-viewer-overlay" onClick={handleClosePageViewer}>
+          <div className="page-viewer-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="page-viewer-header">
+              <span className="page-viewer-title">
+                {pageViewer.application && `${pageViewer.application} - `}Page {pageViewer.pageNumber}
+              </span>
+              <button className="page-viewer-close" onClick={handleClosePageViewer} title="Close (Esc)">
+                ×
+              </button>
+            </div>
+            <div className="page-viewer-content">
+              {pageViewer.isLoading && (
+                <div className="page-viewer-loading">
+                  <div className="loading-spinner"></div>
+                  <p>Loading page...</p>
+                </div>
+              )}
+              <img
+                src={pageViewer.pageUrl}
+                alt={`Page ${pageViewer.pageNumber}`}
+                onLoad={() => setPageViewer(prev => prev ? { ...prev, isLoading: false } : null)}
+                onError={() => setPageViewer(prev => prev ? { ...prev, isLoading: false, error: true } : null)}
+                style={{ display: pageViewer.isLoading ? 'none' : 'block' }}
+              />
+              {pageViewer.error && (
+                <div className="page-viewer-error">
+                  <p>Failed to load page. Please try again.</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

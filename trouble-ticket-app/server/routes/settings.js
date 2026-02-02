@@ -277,4 +277,56 @@ router.post('/test-embeddings', async (req, res) => {
   }
 });
 
+// ============================================
+// IMAGE EXTRACTION SETTINGS
+// ============================================
+
+/**
+ * GET /api/settings/image-extraction
+ * Get image extraction configuration
+ */
+router.get('/image-extraction', async (req, res) => {
+  try {
+    const enabled = await googleSheets.getSetting('image_extraction_enabled');
+    const visionModel = await googleSheets.getSetting('vision_model');
+    const maxImages = await googleSheets.getSetting('max_images_per_doc');
+
+    res.json({
+      enabled: enabled !== 'false', // Default to true if not set
+      visionModel: visionModel || 'openai/gpt-4o-mini',
+      maxImagesPerDoc: parseInt(maxImages) || 20
+    });
+  } catch (error) {
+    console.error('Get image settings error:', error);
+    res.status(500).json({ error: 'Failed to get image settings' });
+  }
+});
+
+/**
+ * PUT /api/settings/image-extraction
+ * Update image extraction configuration
+ */
+router.put('/image-extraction', async (req, res) => {
+  try {
+    const { enabled, visionModel, maxImagesPerDoc } = req.body;
+
+    if (enabled !== undefined) {
+      await googleSheets.updateSetting('image_extraction_enabled', enabled ? 'true' : 'false');
+    }
+
+    if (visionModel) {
+      await googleSheets.updateSetting('vision_model', visionModel);
+    }
+
+    if (maxImagesPerDoc !== undefined) {
+      await googleSheets.updateSetting('max_images_per_doc', String(maxImagesPerDoc));
+    }
+
+    res.json({ success: true, message: 'Image extraction settings updated' });
+  } catch (error) {
+    console.error('Update image settings error:', error);
+    res.status(500).json({ error: 'Failed to update image settings' });
+  }
+});
+
 module.exports = router;

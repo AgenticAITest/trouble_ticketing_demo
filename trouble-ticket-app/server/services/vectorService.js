@@ -318,8 +318,10 @@ async function initChroma() {
 
 /**
  * Add chunks to vector database
+ * @param {Array} chunks - Text chunks to add
+ * @param {string} chunkType - Type of chunks: 'text' or 'image' (default: 'text')
  */
-async function addChunks(chunks) {
+async function addChunks(chunks, chunkType = 'text') {
   loadVectorStore();
   const config = await getEmbeddingConfig();
 
@@ -329,30 +331,44 @@ async function addChunks(chunks) {
 
   // Generate embeddings for all chunks
   const documents = chunks.map(c => c.content);
-  console.log(`Generating embeddings for ${documents.length} chunks using ${config.provider}...`);
+  console.log(`Generating embeddings for ${documents.length} ${chunkType} chunks using ${config.provider}...`);
   const embeddings = await generateEmbeddings(documents);
 
   // Add chunks with embeddings to store
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
-    const id = `${chunk.docId}_chunk_${chunk.index}`;
+    const idSuffix = chunkType === 'image' ? `img_${chunk.index}` : `chunk_${chunk.index}`;
+    const id = `${chunk.docId}_${idSuffix}`;
 
     // Remove existing chunk with same ID if exists
     vectorStore.chunks = vectorStore.chunks.filter(c => c.id !== id);
 
-    vectorStore.chunks.push({
+    const chunkData = {
       id: id,
       content: chunk.content,
       embedding: embeddings[i],
       metadata: {
+        type: chunkType,
         docId: chunk.docId,
         chunkIndex: chunk.index,
         tokenCount: chunk.tokenCount,
         source: chunk.metadata?.source || '',
         numPages: chunk.metadata?.numPages || 0,
-        application: chunk.application || ''
+        application: chunk.application || '',
+        // Page number tracking for on-demand PDF page rendering
+        pageNumber: chunk.pageNumber || 0,
+        startPage: chunk.startPage || 0,
+        endPage: chunk.endPage || 0
       }
-    });
+    };
+
+    // Add image-specific metadata (legacy support)
+    if (chunkType === 'image') {
+      chunkData.metadata.imagePath = chunk.imagePath || '';
+      chunkData.metadata.imageFilename = chunk.imageFilename || '';
+    }
+
+    vectorStore.chunks.push(chunkData);
   }
 
   // Track which provider/model was used
@@ -360,9 +376,37 @@ async function addChunks(chunks) {
   vectorStore.model = config.model;
 
   saveVectorStore();
-  console.log(`Added ${chunks.length} chunks to vector store`);
+  console.log(`Added ${chunks.length} ${chunkType} chunks to vector store`);
 
   return { success: true, count: chunks.length };
+}
+
+/**
+ * Add image chunks to vector database
+ * Images are described first, then the description is embedded
+ * @param {Array<{docId: string, imagePath: string, imageFilename: string, description: string, pageNumber: number, index: number, application: string}>} images
+ */
+async function addImageChunks(images) {
+  if (images.length === 0) {
+    return { success: true, count: 0 };
+  }
+
+  // Convert image data to chunk format
+  const imageChunks = images.map(img => ({
+    content: img.description,
+    docId: img.docId,
+    index: img.index,
+    tokenCount: Math.ceil(img.description.length / 4),
+    imagePath: img.imagePath,
+    imageFilename: img.imageFilename,
+    pageNumber: img.pageNumber,
+    application: img.application,
+    metadata: {
+      source: img.imageFilename
+    }
+  }));
+
+  return addChunks(imageChunks, 'image');
 }
 
 /**
@@ -520,6 +564,7 @@ module.exports = {
   initChroma,
   generateEmbeddings,
   addChunks,
+  addImageChunks,
   search,
   deleteDocument,
   getStats,

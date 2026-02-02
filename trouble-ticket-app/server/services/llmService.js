@@ -329,9 +329,75 @@ function getAvailableProviders() {
   return PROVIDERS;
 }
 
+/**
+ * Describe an image using a vision-capable LLM
+ * @param {string} imagePath - Path to the image file
+ * @param {string} customModel - Optional custom vision model
+ * @returns {Promise<string>} - Text description of the image
+ */
+async function describeImage(imagePath, customModel = null) {
+  const config = await getProviderConfig();
+  const fs = require('fs');
+  const path = require('path');
+
+  // Read image and convert to base64
+  const imageBuffer = fs.readFileSync(imagePath);
+  const base64Image = imageBuffer.toString('base64');
+
+  // Determine image mime type from extension
+  const ext = path.extname(imagePath).toLowerCase();
+  const mimeType = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+
+  // Default vision model (cost-effective options)
+  const visionModel = customModel || 'openai/gpt-4o-mini';
+
+  const prompt = `Describe this image in detail for document search purposes. Focus on:
+1. What the image shows (diagrams, screenshots, charts, text, etc.)
+2. Any visible text or labels
+3. Key visual elements and their relationships
+4. Technical details if it's a software interface or diagram
+
+Keep the description factual and searchable. Be concise but thorough.`;
+
+  return withRetry(async () => {
+    // Use OpenRouter for vision as it provides access to multiple vision models
+    const OpenAI = require('openai');
+    const client = new OpenAI({
+      apiKey: config.apiKey,
+      baseURL: 'https://openrouter.ai/api/v1'
+    });
+
+    const response = await client.chat.completions.create({
+      model: visionModel,
+      max_tokens: 500,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: prompt
+            },
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:${mimeType};base64,${base64Image}`,
+                detail: 'low' // Use low detail to reduce cost
+              }
+            }
+          ]
+        }
+      ]
+    });
+
+    return response.choices[0].message.content;
+  }, 2, 2000); // Fewer retries for vision calls
+}
+
 module.exports = {
   sendMessage,
   testConnection,
   getAvailableProviders,
-  getProviderConfig
+  getProviderConfig,
+  describeImage
 };

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { chatApi } from '../services/api';
 
 const SessionContext = createContext(null);
@@ -46,6 +46,7 @@ export function SessionProvider({ children }) {
     return null;
   });
   const [notifications, setNotifications] = useState({}); // { sessionId: count }
+  const notificationsRef = useRef(notifications);
 
   // Create initial session if none exist
   useEffect(() => {
@@ -63,6 +64,11 @@ export function SessionProvider({ children }) {
   useEffect(() => {
     saveSessions(sessions);
   }, [sessions]);
+
+  // Keep notificationsRef in sync
+  useEffect(() => {
+    notificationsRef.current = notifications;
+  }, [notifications]);
 
   // Poll for notifications across all sessions
   useEffect(() => {
@@ -179,9 +185,10 @@ export function SessionProvider({ children }) {
   /**
    * Mark a specific session as read (clears notifications)
    * Use this when user is actively viewing a session
+   * Uses ref to avoid changing callback reference on notification updates
    */
   const markSessionAsRead = useCallback((sessionId) => {
-    if (notifications[sessionId]) {
+    if (notificationsRef.current[sessionId]) {
       chatApi.markAsRead(sessionId).catch(() => {});
       setNotifications(prev => {
         const updated = { ...prev };
@@ -189,7 +196,7 @@ export function SessionProvider({ children }) {
         return updated;
       });
     }
-  }, [notifications]);
+  }, []);
 
   const value = {
     // Current session

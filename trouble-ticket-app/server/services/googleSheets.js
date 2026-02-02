@@ -415,6 +415,7 @@ async function addDocument(docData) {
     upload_date: docData.upload_date || new Date().toISOString(),
     status: docData.status || 'processing',
     chunk_count: docData.chunk_count || 0,
+    image_count: docData.image_count || 0,
     file_size: docData.file_size || 0,
     num_pages: docData.num_pages || 0
   });

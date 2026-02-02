@@ -83,6 +83,7 @@ router.post('/message', chatMessageRules, validateRequest, async (req, res) => {
     // Search vector database for relevant document chunks
     // Filter by application if we know which one the user is asking about
     let vectorContext = '';
+    let relatedPages = []; // Track pages that can be rendered on-demand
     try {
       const searchOptions = { limit: 5 };
       if (detectedApplication) {
@@ -92,10 +93,36 @@ router.post('/message', chatMessageRules, validateRequest, async (req, res) => {
 
       const vectorResults = await vectorService.search(message, searchOptions);
       if (vectorResults.length > 0) {
+        // Track unique pages from search results
+        const seenPages = new Set();
+
         vectorContext = '\n\n## Relevant Documentation\n' +
-          vectorResults.map((result, i) =>
-            `### [${result.metadata?.application || 'Document'}: ${result.metadata?.source || 'Unknown'}]\n${result.content}`
-          ).join('\n\n---\n\n');
+          vectorResults.map((result, i) => {
+            // Track pages for on-demand rendering (avoiding duplicates)
+            // Only include if we have a valid page number (> 0)
+            const pageNum = result.metadata?.pageNumber || result.metadata?.startPage;
+            const docId = result.metadata?.docId;
+            const pageKey = `${docId}_${pageNum}`;
+
+            if (pageNum && pageNum > 0 && docId && !seenPages.has(pageKey)) {
+              seenPages.add(pageKey);
+              relatedPages.push({
+                docId: docId,
+                pageNumber: pageNum,
+                startPage: result.metadata?.startPage || pageNum,
+                endPage: result.metadata?.endPage || pageNum,
+                application: result.metadata?.application || '',
+                source: result.metadata?.source || '',
+                similarity: result.similarity,
+                // URL for on-demand page rendering
+                pageUrl: `/api/documents/${docId}/page/${pageNum}`
+              });
+            }
+
+            // Format context - include page reference if available
+            const pageInfo = (pageNum && pageNum > 0) ? ` (Page ${pageNum})` : '';
+            return `### [${result.metadata?.application || 'Document'}: ${result.metadata?.source || 'Unknown'}${pageInfo}]\n${result.content}`;
+          }).join('\n\n---\n\n');
       }
     } catch (vectorError) {
       // Vector search is optional - continue without it
@@ -263,12 +290,16 @@ router.post('/message', chatMessageRules, validateRequest, async (req, res) => {
       read: 'TRUE'
     });
 
+    // Only include related pages during troubleshooting phase (not while collecting info)
+    const shouldShowPages = conversationStatus === 'troubleshooting' && relatedPages.length > 0;
+
     res.json({
       response: displayResponse,
       ticket: ticketCreated,
       ticketsClosed: ticketsClosed,
       status: conversationStatus,
-      application: parsedResponse?.application || null
+      application: parsedResponse?.application || null,
+      relatedPages: shouldShowPages ? relatedPages : null
     });
   } catch (error) {
     console.error('Chat error:', error);

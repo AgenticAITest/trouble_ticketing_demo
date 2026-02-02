@@ -47,13 +47,13 @@ Authentication uses SHA-256 hashed passwords stored in Google Sheets settings.
 The LLM must respond with strict JSON: `{ response, application, status, ticket_data }`
 
 ### Key Backend Components
-- `server/services/llmService.js` - Multi-provider LLM integration with retry logic
+- `server/services/llmService.js` - Multi-provider LLM integration (Anthropic, OpenAI, OpenRouter, custom) with retry logic
 - `server/services/googleSheets.js` - All database CRUD operations
-- `server/services/vectorService.js` - ChromaDB vector database for semantic search
-- `server/services/documentService.js` - PDF text extraction and chunking
+- `server/services/vectorService.js` - Multi-provider embeddings with file-based vector store
+- `server/services/documentService.js` - PDF text/image extraction and chunking
 - `server/prompts/systemPrompt.js` - AI behavior and response format definitions
 - `server/middleware/auth.js` - Role-based access control (`requireRole`, `optionalAuth`)
-- `server/middleware/upload.js` - Multer configuration for PDF uploads
+- `server/middleware/encryption.js` - AES-256-CBC encryption for API keys
 
 ### Key Frontend Components
 - `client/src/context/AuthContext.jsx` - Authentication state
@@ -70,18 +70,27 @@ Six sheets: `tickets`, `messages`, `knowledge_base`, `mock_logs`, `settings`, `d
 ## RAG (Retrieval Augmented Generation) Architecture
 
 ```
-PDF Upload → Text Extraction → Chunking → Embeddings → ChromaDB
+PDF Upload → Text Extraction → Chunking → Embeddings → File-based Vector Store
+         ↘ Image Extraction → Vision LLM Description ↗
                                                           ↓
-User Query → Query Embedding → Vector Search → Top-K Results → LLM Context
+User Query → Query Embedding → Cosine Similarity Search → Top-K Results → LLM Context
 ```
 
 ### Components
 - **Document Upload**: Admin uploads PDF via `/api/documents/upload`
-- **Text Extraction**: `pdf-parse` extracts text from PDF
+- **Text Extraction**: `pdf-parse` extracts text, `pdf-to-img` extracts page images
+- **Image Processing**: Vision LLM (via OpenRouter) describes images for searchability
 - **Chunking**: ~500 token chunks with 50 token overlap for context preservation
-- **Embeddings**: OpenAI `text-embedding-3-small` model
-- **Vector DB**: ChromaDB (local, no external service required)
-- **Search**: Semantic similarity search returns top 5 relevant chunks
+- **Embeddings**: Multi-provider support (OpenAI, Cohere, Jina AI, Ollama local)
+- **Vector Store**: File-based JSON store at `server/data/vectors.json` (no external DB required)
+- **Search**: Cosine similarity search returns top 5 relevant chunks
+
+### Embedding Providers
+Configurable in Admin Settings → Embeddings:
+- **OpenAI**: `text-embedding-3-small`, `text-embedding-3-large`
+- **Cohere**: `embed-english-v3.0`, `embed-multilingual-v3.0`
+- **Jina AI**: `jina-embeddings-v2-base-en`
+- **Ollama (local)**: `nomic-embed-text`, `all-minilm`
 
 ### API Endpoints
 - `POST /api/documents/upload` - Upload PDF (admin only)
@@ -95,6 +104,8 @@ Copy `server/.env.example` to `server/.env` and configure:
 - Google Sheets credentials (service account email + private key)
 - `ENCRYPTION_KEY` - exactly 32 characters for API key encryption
 - `GOOGLE_SPREADSHEET_ID` - the spreadsheet ID from the URL
+- Optional embedding provider keys: `OPENAI_API_KEY`, `COHERE_API_KEY`, `JINA_API_KEY`
+- Optional local embeddings: `OLLAMA_URL` (default: `http://localhost:11434`)
 
 Generate encryption key:
 ```bash
@@ -105,3 +116,9 @@ Generate password hashes:
 ```bash
 node -e "console.log(require('crypto').createHash('sha256').update('your-password').digest('hex'))"
 ```
+
+## Data Files
+
+- `server/data/vectors.json` - Persisted vector embeddings (auto-created)
+- `server/uploads/` - Uploaded PDF documents
+- `server/data/images/` - Extracted PDF page images (for vision processing)

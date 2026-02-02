@@ -80,7 +80,7 @@ const settingsRules = [
     .isLength({ max: 100 })
     .withMessage('Model name must be less than 100 characters'),
   body('baseUrl')
-    .optional()
+    .optional({ values: 'falsy' })
     .isURL()
     .withMessage('Base URL must be a valid URL')
 ];

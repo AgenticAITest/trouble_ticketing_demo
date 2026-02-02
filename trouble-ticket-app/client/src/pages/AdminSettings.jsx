@@ -720,6 +720,15 @@ const DocumentManager = () => {
     application: ''
   });
   const [message, setMessage] = useState({ type: '', text: '' });
+  const [imageViewerDoc, setImageViewerDoc] = useState(null);
+  const [docImages, setDocImages] = useState([]);
+  const [isLoadingImages, setIsLoadingImages] = useState(false);
+  const [imageSettings, setImageSettings] = useState({
+    enabled: true,
+    visionModel: 'openai/gpt-4o-mini',
+    maxImagesPerDoc: 20
+  });
+  const [showImageSettings, setShowImageSettings] = useState(false);
   const fileInputRef = useRef(null);
 
   // Application options (can be extended)
@@ -728,6 +737,7 @@ const DocumentManager = () => {
   useEffect(() => {
     loadDocuments();
     loadStats();
+    loadImageSettings();
   }, []);
 
   const loadDocuments = async () => {
@@ -747,6 +757,40 @@ const DocumentManager = () => {
       setStats(data);
     } catch (error) {
       console.error('Failed to load stats:', error);
+    }
+  };
+
+  const loadImageSettings = async () => {
+    try {
+      const data = await settingsApi.getImageExtractionSettings();
+      setImageSettings(data);
+    } catch (error) {
+      console.error('Failed to load image settings:', error);
+    }
+  };
+
+  const handleSaveImageSettings = async () => {
+    try {
+      await settingsApi.updateImageExtractionSettings(imageSettings);
+      setMessage({ type: 'success', text: 'Image extraction settings saved!' });
+    } catch (error) {
+      setMessage({ type: 'error', text: 'Failed to save image settings' });
+    }
+  };
+
+  const handleViewImages = async (doc) => {
+    setImageViewerDoc(doc);
+    setIsLoadingImages(true);
+    setDocImages([]);
+
+    try {
+      const images = await documentsApi.getDocumentImages(doc.doc_id);
+      setDocImages(images);
+    } catch (error) {
+      console.error('Failed to load images:', error);
+      setMessage({ type: 'error', text: 'Failed to load images' });
+    } finally {
+      setIsLoadingImages(false);
     }
   };
 
@@ -871,9 +915,71 @@ const DocumentManager = () => {
             <span className="stat-label">Total Chunks</span>
           </div>
           <div className="stat-item">
+            <span className="stat-value">{stats.totalImages || 0}</span>
+            <span className="stat-label">Total Images</span>
+          </div>
+          <div className="stat-item">
             <span className="stat-value">{stats.embeddingModel || 'N/A'}</span>
             <span className="stat-label">Embedding Model</span>
           </div>
+        </div>
+      )}
+
+      <div className="image-settings-toggle">
+        <button
+          className="btn-secondary"
+          onClick={() => setShowImageSettings(!showImageSettings)}
+        >
+          {showImageSettings ? 'Hide' : 'Show'} Image Extraction Settings
+        </button>
+      </div>
+
+      {showImageSettings && (
+        <div className="image-settings-form">
+          <h3>Image Extraction Settings</h3>
+          <div className="form-group checkbox-group">
+            <label>
+              <input
+                type="checkbox"
+                checked={imageSettings.enabled}
+                onChange={(e) => setImageSettings({ ...imageSettings, enabled: e.target.checked })}
+              />
+              Enable Image Extraction
+            </label>
+            <small className="hint">
+              When enabled, images are extracted from PDFs, described by AI, and made searchable.
+            </small>
+          </div>
+
+          <div className="form-group">
+            <label>Vision Model</label>
+            <select
+              value={imageSettings.visionModel}
+              onChange={(e) => setImageSettings({ ...imageSettings, visionModel: e.target.value })}
+            >
+              <option value="openai/gpt-4o-mini">OpenAI GPT-4o Mini (Recommended)</option>
+              <option value="openai/gpt-4o">OpenAI GPT-4o</option>
+              <option value="anthropic/claude-3-haiku">Claude 3 Haiku</option>
+              <option value="anthropic/claude-3-sonnet">Claude 3 Sonnet</option>
+            </select>
+            <small className="hint">Model used to generate text descriptions of images.</small>
+          </div>
+
+          <div className="form-group">
+            <label>Max Images Per Document</label>
+            <input
+              type="number"
+              min="1"
+              max="50"
+              value={imageSettings.maxImagesPerDoc}
+              onChange={(e) => setImageSettings({ ...imageSettings, maxImagesPerDoc: parseInt(e.target.value) || 20 })}
+            />
+            <small className="hint">Maximum number of images to extract per PDF.</small>
+          </div>
+
+          <button className="btn-primary" onClick={handleSaveImageSettings}>
+            Save Image Settings
+          </button>
         </div>
       )}
 
@@ -959,6 +1065,7 @@ const DocumentManager = () => {
                 <th>Application</th>
                 <th>Pages</th>
                 <th>Chunks</th>
+                <th>Images</th>
                 <th>Size</th>
                 <th>Uploaded</th>
                 <th>Actions</th>
@@ -977,6 +1084,18 @@ const DocumentManager = () => {
                   </td>
                   <td>{doc.num_pages}</td>
                   <td>{doc.chunk_count}</td>
+                  <td>
+                    {parseInt(doc.image_count) > 0 ? (
+                      <button
+                        className="btn-link"
+                        onClick={() => handleViewImages(doc)}
+                      >
+                        {doc.image_count} images
+                      </button>
+                    ) : (
+                      <span className="text-muted">0</span>
+                    )}
+                  </td>
                   <td>{formatFileSize(parseInt(doc.file_size) || 0)}</td>
                   <td>{formatDate(doc.upload_date)}</td>
                   <td>
@@ -993,6 +1112,38 @@ const DocumentManager = () => {
           </table>
         )}
       </div>
+
+      {/* Image Viewer Modal */}
+      {imageViewerDoc && (
+        <div className="modal-overlay" onClick={() => setImageViewerDoc(null)}>
+          <div className="modal-content image-viewer-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Images from: {imageViewerDoc.title}</h3>
+              <button className="modal-close" onClick={() => setImageViewerDoc(null)}>×</button>
+            </div>
+            <div className="modal-body">
+              {isLoadingImages ? (
+                <div className="loading">Loading images...</div>
+              ) : docImages.length === 0 ? (
+                <p className="empty">No images found for this document.</p>
+              ) : (
+                <div className="image-grid">
+                  {docImages.map((img, index) => (
+                    <div key={index} className="image-item">
+                      <img
+                        src={img.url}
+                        alt={`Image ${index + 1} from ${imageViewerDoc.title}`}
+                        loading="lazy"
+                      />
+                      <div className="image-caption">{img.filename}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
