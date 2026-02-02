@@ -5,11 +5,38 @@
 const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 const { chatMessageRules, sessionIdRules, validateRequest } = require('../middleware/validate');
 const googleSheets = require('../services/googleSheets');
 const llmService = require('../services/llmService');
 const vectorService = require('../services/vectorService');
 const { getSystemPrompt } = require('../prompts/systemPrompt');
+
+// Configure image upload storage
+const CHAT_IMAGES_DIR = path.join(__dirname, '..', 'data', 'chat-images');
+if (!fs.existsSync(CHAT_IMAGES_DIR)) {
+  fs.mkdirSync(CHAT_IMAGES_DIR, { recursive: true });
+}
+
+// In-memory storage for uploaded images (cleared after use)
+const uploadedImages = new Map();
+
+// Multer config for image uploads
+const imageStorage = multer.memoryStorage();
+const imageUpload = multer({
+  storage: imageStorage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only JPEG, PNG, GIF, and WebP images are allowed'), false);
+    }
+  }
+});
 
 /**
  * Parse AI JSON response
@@ -50,12 +77,70 @@ function extractTicketDataLegacy(response) {
 }
 
 /**
+ * POST /api/chat/upload-image
+ * Upload an image for troubleshooting
+ * Returns an imageId that can be used with the message endpoint
+ */
+router.post('/upload-image', imageUpload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No image uploaded' });
+    }
+
+    const imageId = `img_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    // Store image in memory temporarily (will be cleared after use)
+    uploadedImages.set(imageId, {
+      buffer: req.file.buffer,
+      mimetype: req.file.mimetype,
+      originalname: req.file.originalname,
+      uploadedAt: Date.now()
+    });
+
+    // Clean up old images (older than 10 minutes)
+    const TEN_MINUTES = 10 * 60 * 1000;
+    for (const [id, img] of uploadedImages.entries()) {
+      if (Date.now() - img.uploadedAt > TEN_MINUTES) {
+        uploadedImages.delete(id);
+      }
+    }
+
+    console.log(`Image uploaded: ${imageId} (${req.file.mimetype}, ${req.file.buffer.length} bytes)`);
+
+    res.json({
+      imageId: imageId,
+      filename: req.file.originalname,
+      size: req.file.buffer.length,
+      mimetype: req.file.mimetype
+    });
+  } catch (error) {
+    console.error('Image upload error:', error);
+    res.status(500).json({ error: 'Failed to upload image', message: error.message });
+  }
+});
+
+/**
  * POST /api/chat/message
  * Send a message and get AI response
+ * Optionally include imageId to send an image with the message
  */
 router.post('/message', chatMessageRules, validateRequest, async (req, res) => {
   try {
-    const { sessionId, message } = req.body;
+    const { sessionId, message, imageId } = req.body;
+
+    // Check if there's an image to process
+    let imageData = null;
+    if (imageId && uploadedImages.has(imageId)) {
+      const img = uploadedImages.get(imageId);
+      imageData = {
+        base64: img.buffer.toString('base64'),
+        mimetype: img.mimetype,
+        filename: img.originalname
+      };
+      // Remove from memory after retrieval
+      uploadedImages.delete(imageId);
+      console.log(`Processing message with image: ${imageId}`);
+    }
 
     // Get conversation history
     const history = await googleSheets.getMessagesBySession(sessionId);
@@ -104,7 +189,26 @@ router.post('/message', chatMessageRules, validateRequest, async (req, res) => {
             const docId = result.metadata?.docId;
             const pageKey = `${docId}_${pageNum}`;
 
-            if (pageNum && pageNum > 0 && docId && !seenPages.has(pageKey)) {
+            // Check if this is a markdown section (has header but no pageNumber)
+            const isMarkdown = result.metadata?.fileType === 'markdown' || result.metadata?.header;
+            const header = result.metadata?.header;
+            const sectionKey = isMarkdown ? `${docId}_${header}` : pageKey;
+
+            if (isMarkdown && header && docId && !seenPages.has(sectionKey)) {
+              // Markdown section - no page viewer, just show section info
+              seenPages.add(sectionKey);
+              relatedPages.push({
+                docId: docId,
+                pageNumber: null,
+                header: header,
+                sectionIndex: result.metadata?.sectionIndex || 0,
+                application: result.metadata?.application || '',
+                source: result.metadata?.source || '',
+                similarity: result.similarity,
+                fileType: 'markdown'
+              });
+            } else if (pageNum && pageNum > 0 && docId && !seenPages.has(pageKey)) {
+              // PDF page - include page viewer URL
               seenPages.add(pageKey);
               relatedPages.push({
                 docId: docId,
@@ -114,6 +218,7 @@ router.post('/message', chatMessageRules, validateRequest, async (req, res) => {
                 application: result.metadata?.application || '',
                 source: result.metadata?.source || '',
                 similarity: result.similarity,
+                fileType: 'pdf',
                 // URL for on-demand page rendering
                 pageUrl: `/api/documents/${docId}/page/${pageNum}`
               });
@@ -149,10 +254,21 @@ router.post('/message', chatMessageRules, validateRequest, async (req, res) => {
       read: 'TRUE'
     });
 
-    // Get AI response
+    // Get AI response (with or without image)
     let rawAiResponse;
     try {
-      rawAiResponse = await llmService.sendMessage(message, history, knowledgeBase, systemPrompt);
+      if (imageData) {
+        // Use vision-capable LLM for image analysis
+        rawAiResponse = await llmService.sendMessageWithImage(
+          message,
+          imageData.base64,
+          imageData.mimetype,
+          history,
+          systemPrompt
+        );
+      } else {
+        rawAiResponse = await llmService.sendMessage(message, history, knowledgeBase, systemPrompt);
+      }
     } catch (error) {
       console.error('LLM error:', error);
       rawAiResponse = JSON.stringify({
@@ -280,6 +396,8 @@ router.post('/message', chatMessageRules, validateRequest, async (req, res) => {
     }
 
     // Save AI response (human-readable version)
+    // Include related_pages only if we're showing them to the user
+    const pagesToStore = shouldShowPages ? relatedPages : null;
     await googleSheets.addMessage({
       message_id: uuidv4(),
       session_id: sessionId,
@@ -287,11 +405,14 @@ router.post('/message', chatMessageRules, validateRequest, async (req, res) => {
       sender: 'ai',
       content: displayResponse,
       timestamp: new Date().toISOString(),
-      read: 'TRUE'
+      read: 'TRUE',
+      related_pages: pagesToStore ? JSON.stringify(pagesToStore) : ''
     });
 
-    // Only include related pages during troubleshooting phase (not while collecting info)
-    const shouldShowPages = conversationStatus === 'troubleshooting' && relatedPages.length > 0;
+    // Show pages during troubleshooting OR when user explicitly asks for visuals
+    const visualKeywords = /screenshot|image|show me|picture|visual|how.*look|see.*page/i;
+    const userAskedForVisuals = visualKeywords.test(message);
+    const shouldShowPages = relatedPages.length > 0 && (conversationStatus === 'troubleshooting' || userAskedForVisuals);
 
     res.json({
       response: displayResponse,

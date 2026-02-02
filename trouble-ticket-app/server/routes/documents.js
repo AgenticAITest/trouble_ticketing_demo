@@ -14,8 +14,9 @@ const googleSheets = require('../services/googleSheets');
 
 /**
  * POST /api/documents/upload
- * Upload and process a PDF document
- * Text is extracted with page numbers for on-demand page rendering
+ * Upload and process a PDF or Markdown document
+ * PDF: Text is extracted with page numbers for on-demand page rendering
+ * Markdown: Text is chunked by headers for FAQ-style content
  * Requires admin role
  */
 router.post('/upload',
@@ -37,9 +38,11 @@ router.post('/upload',
       }
 
       const docId = `doc_${uuidv4().slice(0, 8)}`;
+      const ext = path.extname(req.file.originalname).toLowerCase();
+      const isMarkdown = ext === '.md';
 
-      // Process the PDF (text extraction with page tracking)
-      console.log(`Processing document: ${req.file.originalname} for application: ${application}`);
+      // Process the document (PDF or Markdown)
+      console.log(`Processing ${isMarkdown ? 'markdown' : 'PDF'} document: ${req.file.originalname} for application: ${application}`);
       const result = await documentService.processDocument(filePath, docId, { application });
 
       // Add application to each chunk before storing
@@ -48,29 +51,34 @@ router.post('/upload',
         application: application
       }));
 
-      // Store text chunks in vector database (includes page numbers)
-      console.log(`Storing ${chunksWithApp.length} text chunks in vector database`);
+      // Store text chunks in vector database
+      console.log(`Storing ${chunksWithApp.length} ${isMarkdown ? 'section' : 'text'} chunks in vector database`);
       await vectorService.addChunks(chunksWithApp, 'text');
 
-      // Keep the PDF file for on-demand page rendering
-      documentService.keepPDFFile(filePath, docId);
-      console.log(`Stored PDF for on-demand rendering: ${docId}`);
+      // For PDFs, keep the file for on-demand page rendering
+      // For Markdown, we don't need to keep the file
+      if (!isMarkdown) {
+        documentService.keepPDFFile(filePath, docId);
+        console.log(`Stored PDF for on-demand rendering: ${docId}`);
+      }
 
       // Save document metadata to Google Sheets
+      const fileExtClean = ext.replace('.', '');
       await googleSheets.addDocument({
         doc_id: docId,
         filename: req.file.originalname,
-        title: title || req.file.originalname.replace('.pdf', ''),
+        title: title || req.file.originalname.replace(ext, ''),
         application: application,
         upload_date: new Date().toISOString(),
         status: 'processed',
         chunk_count: result.chunks.length,
-        image_count: 0, // No longer extracting images
+        image_count: 0,
         file_size: req.file.size,
-        num_pages: result.metadata.numPages
+        num_pages: result.metadata.numPages,
+        file_type: isMarkdown ? 'markdown' : 'pdf'
       });
 
-      // Clean up the temp uploaded file (we've copied it to documents folder)
+      // Clean up the temp uploaded file
       documentService.deleteFile(filePath);
 
       res.json({
@@ -82,7 +90,8 @@ router.post('/upload',
           application: application,
           numPages: result.metadata.numPages,
           chunkCount: result.chunks.length,
-          totalTokens: result.metadata.totalTokens
+          totalTokens: result.metadata.totalTokens,
+          fileType: isMarkdown ? 'markdown' : 'pdf'
         }
       });
     } catch (error) {
@@ -100,6 +109,22 @@ router.post('/upload',
     }
   }
 );
+
+/**
+ * GET /api/documents/applications
+ * Get unique application names from all documents
+ * Public endpoint for populating dropdown
+ */
+router.get('/applications', async (req, res) => {
+  try {
+    const documents = await googleSheets.getAllDocuments();
+    const applications = [...new Set(documents.map(d => d.application))].filter(Boolean);
+    res.json(applications);
+  } catch (error) {
+    console.error('Get applications error:', error);
+    res.status(500).json({ error: 'Failed to get applications' });
+  }
+});
 
 /**
  * GET /api/documents

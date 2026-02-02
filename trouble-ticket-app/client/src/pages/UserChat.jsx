@@ -31,7 +31,10 @@ const UserChat = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [showSidebar, setShowSidebar] = useState(false);
   const [pageViewer, setPageViewer] = useState(null); // { docId, pageNumber, pageUrl, isLoading }
+  const [selectedImage, setSelectedImage] = useState(null); // { file, preview }
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
   const messagesEndRef = useRef(null);
+  const imageInputRef = useRef(null);
 
   // Scroll to bottom when messages change
   const scrollToBottom = () => {
@@ -61,16 +64,47 @@ const UserChat = () => {
   }, [sessionId, markSessionAsRead]);
 
   const handleSend = async () => {
-    if (!inputValue.trim() || isLoading || !sessionId) return;
+    if ((!inputValue.trim() && !selectedImage) || isLoading || !sessionId) return;
 
-    const userMessage = { sender: 'user', content: inputValue, timestamp: new Date().toISOString() };
+    // Build user message content
+    const userMessageContent = inputValue.trim() || (selectedImage ? 'Please help me with this screenshot.' : '');
+    const userMessage = {
+      sender: 'user',
+      content: userMessageContent,
+      timestamp: new Date().toISOString(),
+      image: selectedImage ? selectedImage.preview : null
+    };
     setMessages(prev => [...prev, userMessage]);
-    const sentMessage = inputValue;
+    const sentMessage = userMessageContent;
+    const imageToSend = selectedImage;
     setInputValue('');
+    setSelectedImage(null);
     setIsLoading(true);
 
     try {
-      const response = await chatApi.sendMessage(sessionId, sentMessage);
+      let imageId = null;
+
+      // Upload image first if present
+      if (imageToSend) {
+        setIsUploadingImage(true);
+        try {
+          const uploadResult = await chatApi.uploadImage(imageToSend.file);
+          imageId = uploadResult.imageId;
+        } catch (uploadError) {
+          console.error('Image upload failed:', uploadError);
+          setMessages(prev => [...prev, {
+            sender: 'ai',
+            content: 'Sorry, I couldn\'t upload your image. Please try again.',
+            timestamp: new Date().toISOString()
+          }]);
+          setIsLoading(false);
+          setIsUploadingImage(false);
+          return;
+        }
+        setIsUploadingImage(false);
+      }
+
+      const response = await chatApi.sendMessage(sessionId, sentMessage, imageId);
       const aiMessage = {
         sender: 'ai',
         content: response.response,
@@ -97,7 +131,33 @@ const UserChat = () => {
       }]);
     } finally {
       setIsLoading(false);
+      setIsUploadingImage(false);
     }
+  };
+
+  // Handle image selection
+  const handleImageSelect = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      if (file.size > 5 * 1024 * 1024) {
+        alert('Image size must be less than 5MB');
+        return;
+      }
+      const preview = URL.createObjectURL(file);
+      setSelectedImage({ file, preview });
+    }
+    // Reset file input
+    if (imageInputRef.current) {
+      imageInputRef.current.value = '';
+    }
+  };
+
+  // Remove selected image
+  const handleRemoveImage = () => {
+    if (selectedImage?.preview) {
+      URL.revokeObjectURL(selectedImage.preview);
+    }
+    setSelectedImage(null);
   };
 
   const handleNotificationClick = () => {
@@ -286,27 +346,40 @@ const UserChat = () => {
             <div className="messages-container">
               {messages.map((msg, index) => (
                 <div key={index} className={`message-bubble ${msg.sender}`}>
+                  {msg.image && (
+                    <div className="message-image">
+                      <img src={msg.image} alt="Attached screenshot" />
+                    </div>
+                  )}
                   <div className="message-content">{msg.content}</div>
                   {msg.relatedPages && msg.relatedPages.length > 0 && (
                     <div className="related-pages">
                       <div className="related-pages-header">Related Documentation:</div>
                       <div className="related-pages-list">
-                        {msg.relatedPages.slice(0, 3).map((page, pageIdx) => (
-                          <button
-                            key={pageIdx}
-                            className="view-page-btn"
-                            onClick={() => handleViewPage(page)}
-                            title={`View page ${page.pageNumber} from ${page.source || page.application}`}
-                          >
-                            <span className="page-icon">📄</span>
-                            <span className="page-info">
-                              <span className="page-number">Page {page.pageNumber}</span>
-                              {page.application && (
-                                <span className="page-source">{page.application}</span>
-                              )}
-                            </span>
-                          </button>
-                        ))}
+                        {msg.relatedPages.slice(0, 3).map((page, pageIdx) => {
+                          // Check if this is a markdown section (no pageNumber or pageNumber is null)
+                          const isMarkdown = !page.pageNumber && page.header;
+                          return (
+                            <button
+                              key={pageIdx}
+                              className={`view-page-btn ${isMarkdown ? 'markdown-section' : ''}`}
+                              onClick={() => !isMarkdown && handleViewPage(page)}
+                              title={isMarkdown ? `Section: ${page.header}` : `View page ${page.pageNumber} from ${page.source || page.application}`}
+                              disabled={isMarkdown}
+                              style={isMarkdown ? { cursor: 'default' } : {}}
+                            >
+                              <span className="page-icon">{isMarkdown ? '📝' : '📄'}</span>
+                              <span className="page-info">
+                                <span className="page-number">
+                                  {isMarkdown ? `Section: ${page.header}` : `Page ${page.pageNumber}`}
+                                </span>
+                                {page.application && (
+                                  <span className="page-source">{page.application}</span>
+                                )}
+                              </span>
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
                   )}
@@ -335,17 +408,50 @@ const UserChat = () => {
         </div>
 
         <div className="input-area">
+          {/* Hidden file input for image upload */}
           <input
-            type="text"
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyPress={(e) => e.key === 'Enter' && handleSend()}
-            placeholder="Describe your issue..."
-            disabled={isLoading}
+            type="file"
+            ref={imageInputRef}
+            accept="image/jpeg,image/png,image/gif,image/webp"
+            onChange={handleImageSelect}
+            style={{ display: 'none' }}
           />
-          <button className="btn-primary" onClick={handleSend} disabled={isLoading || !inputValue.trim()}>
-            Send
-          </button>
+
+          {/* Image preview */}
+          {selectedImage && (
+            <div className="image-preview">
+              <img src={selectedImage.preview} alt="Selected" />
+              <button className="remove-image-btn" onClick={handleRemoveImage} title="Remove image">
+                ×
+              </button>
+            </div>
+          )}
+
+          <div className="input-row">
+            <button
+              className="image-upload-btn"
+              onClick={() => imageInputRef.current?.click()}
+              disabled={isLoading}
+              title="Attach screenshot"
+            >
+              📷
+            </button>
+            <input
+              type="text"
+              value={inputValue}
+              onChange={(e) => setInputValue(e.target.value)}
+              onKeyPress={(e) => e.key === 'Enter' && handleSend()}
+              placeholder={selectedImage ? "Add a message about your screenshot..." : "Describe your issue..."}
+              disabled={isLoading}
+            />
+            <button
+              className="btn-primary"
+              onClick={handleSend}
+              disabled={isLoading || (!inputValue.trim() && !selectedImage)}
+            >
+              {isUploadingImage ? '...' : 'Send'}
+            </button>
+          </div>
         </div>
       </div>
 

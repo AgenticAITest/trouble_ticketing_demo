@@ -394,8 +394,156 @@ Keep the description factual and searchable. Be concise but thorough.`;
   }, 2, 2000); // Fewer retries for vision calls
 }
 
+/**
+ * Send a message with an image to a vision-capable LLM
+ * @param {string} userMessage - The user's text message
+ * @param {string} imageBase64 - Base64 encoded image data
+ * @param {string} mimeType - Image MIME type (image/png, image/jpeg, etc.)
+ * @param {Array} conversationHistory - Previous messages
+ * @param {string} systemPrompt - System prompt for the AI
+ * @returns {Promise<string>} - AI response text
+ */
+async function sendMessageWithImage(userMessage, imageBase64, mimeType, conversationHistory, systemPrompt) {
+  const config = await getProviderConfig();
+
+  if (!config.apiKey) {
+    throw new Error('No API key configured. Please set up the API key in Admin Settings.');
+  }
+
+  return withRetry(async () => {
+    // Build conversation history (text only for previous messages)
+    const previousMessages = conversationHistory.map(msg => ({
+      role: msg.sender === 'user' ? 'user' : 'assistant',
+      content: msg.content
+    }));
+
+    // The current message includes both text and image
+    const userContent = [
+      {
+        type: 'text',
+        text: userMessage || 'Please analyze this image and help me troubleshoot the issue shown.'
+      },
+      {
+        type: 'image_url',
+        image_url: {
+          url: `data:${mimeType};base64,${imageBase64}`,
+          detail: 'high'
+        }
+      }
+    ];
+
+    switch (config.provider) {
+      case 'anthropic':
+        return sendAnthropicMessageWithImage(config, previousMessages, userContent, systemPrompt);
+      case 'openai':
+        return sendOpenAIMessageWithImage(config, previousMessages, userContent, systemPrompt);
+      case 'openrouter':
+        return sendOpenRouterMessageWithImage(config, previousMessages, userContent, systemPrompt);
+      default:
+        throw new Error(`Provider ${config.provider} does not support vision. Please use OpenAI, Anthropic, or OpenRouter.`);
+    }
+  });
+}
+
+/**
+ * Send message with image via Anthropic API
+ */
+async function sendAnthropicMessageWithImage(config, previousMessages, userContent, systemPrompt) {
+  const client = new Anthropic({ apiKey: config.apiKey });
+
+  // Convert user content to Anthropic format
+  const anthropicContent = userContent.map(item => {
+    if (item.type === 'text') {
+      return { type: 'text', text: item.text };
+    } else if (item.type === 'image_url') {
+      // Extract base64 data and media type from data URL
+      const dataUrl = item.image_url.url;
+      const matches = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+      if (matches) {
+        return {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: matches[1],
+            data: matches[2]
+          }
+        };
+      }
+    }
+    return item;
+  });
+
+  // Build messages
+  const messages = [...previousMessages, { role: 'user', content: anthropicContent }];
+
+  const response = await client.messages.create({
+    model: config.model || 'claude-sonnet-4-20250514',
+    max_tokens: 2048,
+    system: systemPrompt,
+    messages: messages
+  });
+
+  return response.content[0].text;
+}
+
+/**
+ * Send message with image via OpenAI API
+ */
+async function sendOpenAIMessageWithImage(config, previousMessages, userContent, systemPrompt) {
+  const client = new OpenAI({ apiKey: config.apiKey });
+
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    ...previousMessages,
+    { role: 'user', content: userContent }
+  ];
+
+  // Use a vision-capable model
+  const visionModel = config.model?.includes('gpt-4') ? config.model : 'gpt-4o';
+
+  const response = await client.chat.completions.create({
+    model: visionModel,
+    messages: messages,
+    max_tokens: 2048
+  });
+
+  return response.choices[0].message.content;
+}
+
+/**
+ * Send message with image via OpenRouter API
+ */
+async function sendOpenRouterMessageWithImage(config, previousMessages, userContent, systemPrompt) {
+  const client = new OpenAI({
+    apiKey: config.apiKey,
+    baseURL: 'https://openrouter.ai/api/v1'
+  });
+
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    ...previousMessages,
+    { role: 'user', content: userContent }
+  ];
+
+  // Use a vision-capable model via OpenRouter
+  let visionModel = config.model || 'openai/gpt-4o';
+  // If current model doesn't support vision, switch to one that does
+  if (!visionModel.includes('gpt-4') && !visionModel.includes('claude-3') && !visionModel.includes('gemini')) {
+    visionModel = 'openai/gpt-4o';
+  }
+
+  const response = await client.chat.completions.create({
+    model: visionModel,
+    messages: messages,
+    max_tokens: 2048
+  });
+
+  return response.choices[0].message.content;
+}
+
 module.exports = {
   sendMessage,
+  sendMessageWithImage,
   testConnection,
   getAvailableProviders,
   getProviderConfig,

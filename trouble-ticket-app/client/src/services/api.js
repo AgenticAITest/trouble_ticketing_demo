@@ -38,11 +38,32 @@ async function fetchApi(endpoint, options = {}) {
 // ============================================
 
 export const chatApi = {
-  sendMessage: async (sessionId, message) => {
+  sendMessage: async (sessionId, message, imageId = null) => {
+    const body = { sessionId, message };
+    if (imageId) {
+      body.imageId = imageId;
+    }
     return fetchApi('/chat/message', {
       method: 'POST',
-      body: JSON.stringify({ sessionId, message })
+      body: JSON.stringify(body)
     });
+  },
+
+  uploadImage: async (file) => {
+    const formData = new FormData();
+    formData.append('image', file);
+
+    const response = await fetch(`${API_BASE}/chat/upload-image`, {
+      method: 'POST',
+      body: formData
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'Upload failed' }));
+      throw new Error(error.error || error.message || 'Upload failed');
+    }
+
+    return response.json();
   },
 
   getSession: async (sessionId) => {
@@ -238,6 +259,10 @@ export const knowledgeApi = {
 export const documentsApi = {
   getDocuments: async () => {
     return fetchApi('/documents', { headers: getAuthHeaders() });
+  },
+
+  getApplications: async () => {
+    return fetchApi('/documents/applications');
   },
 
   getDocument: async (docId) => {

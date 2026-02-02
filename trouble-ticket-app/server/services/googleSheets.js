@@ -163,7 +163,8 @@ async function addMessage(messageData) {
     sender: messageData.sender,
     content: messageData.content,
     timestamp: messageData.timestamp || new Date().toISOString(),
-    read: messageData.read || 'FALSE'
+    read: messageData.read || 'FALSE',
+    related_pages: messageData.related_pages || ''
   });
   return rowToObject(row);
 }
@@ -176,7 +177,20 @@ async function getMessagesBySession(sessionId) {
   const rows = await sheet.getRows();
   return rows
     .filter(row => row.get('session_id') === sessionId)
-    .map(rowToObject)
+    .map(row => {
+      const message = rowToObject(row);
+      // Parse related_pages JSON if present
+      if (message.related_pages) {
+        try {
+          message.relatedPages = JSON.parse(message.related_pages);
+        } catch (e) {
+          message.relatedPages = null;
+        }
+      } else {
+        message.relatedPages = null;
+      }
+      return message;
+    })
     .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
 }
 

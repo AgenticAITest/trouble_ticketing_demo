@@ -731,14 +731,43 @@ const DocumentManager = () => {
   const [showImageSettings, setShowImageSettings] = useState(false);
   const fileInputRef = useRef(null);
 
-  // Application options (can be extended)
-  const applications = ['Attendance', 'Delivery', 'Inventory', 'Nafien', 'Other'];
+  // Dynamic application options from API
+  const [applications, setApplications] = useState([]);
+  const [showCustomAppInput, setShowCustomAppInput] = useState(false);
+  const [customApplication, setCustomApplication] = useState('');
 
   useEffect(() => {
     loadDocuments();
     loadStats();
     loadImageSettings();
+    loadApplications();
   }, []);
+
+  const loadApplications = async () => {
+    try {
+      const apps = await documentsApi.getApplications();
+      // Combine existing applications with some defaults, then add "Other"
+      const defaultApps = ['Attendance', 'Delivery', 'Inventory', 'Nafien'];
+      const allApps = [...new Set([...defaultApps, ...apps])].sort();
+      setApplications([...allApps, 'Other']);
+    } catch (error) {
+      console.error('Failed to load applications:', error);
+      // Fallback to defaults if API fails
+      setApplications(['Attendance', 'Delivery', 'Inventory', 'Nafien', 'Other']);
+    }
+  };
+
+  const handleApplicationChange = (e) => {
+    const value = e.target.value;
+    if (value === 'Other') {
+      setShowCustomAppInput(true);
+      setUploadData({ ...uploadData, application: customApplication });
+    } else {
+      setShowCustomAppInput(false);
+      setCustomApplication('');
+      setUploadData({ ...uploadData, application: value });
+    }
+  };
 
   const loadDocuments = async () => {
     try {
@@ -797,8 +826,12 @@ const DocumentManager = () => {
   const handleFileSelect = (e) => {
     const file = e.target.files[0];
     if (file) {
-      if (file.type !== 'application/pdf') {
-        setMessage({ type: 'error', text: 'Only PDF files are allowed' });
+      const ext = file.name.toLowerCase().split('.').pop();
+      const allowedTypes = ['application/pdf', 'text/markdown', 'text/x-markdown'];
+      const allowedExtensions = ['pdf', 'md'];
+
+      if (!allowedTypes.includes(file.type) && !allowedExtensions.includes(ext)) {
+        setMessage({ type: 'error', text: 'Only PDF and Markdown (.md) files are allowed' });
         return;
       }
       if (file.size > 10 * 1024 * 1024) {
@@ -808,7 +841,7 @@ const DocumentManager = () => {
       setUploadData({
         ...uploadData,
         file: file,
-        title: file.name.replace('.pdf', '')
+        title: file.name.replace(/\.(pdf|md)$/i, '')
       });
       setMessage({ type: '', text: '' });
     }
@@ -842,9 +875,14 @@ const DocumentManager = () => {
       // Reset form
       setUploadData({ file: null, title: '', application: '' });
       setShowUploadForm(false);
+      setShowCustomAppInput(false);
+      setCustomApplication('');
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
       }
+
+      // Reload applications to include newly added one
+      loadApplications();
 
       // Reload data
       loadDocuments();
@@ -992,16 +1030,19 @@ const DocumentManager = () => {
           <h3>Upload New Document</h3>
 
           <div className="form-group">
-            <label>PDF File</label>
+            <label>Document File (PDF or Markdown)</label>
             <input
               type="file"
-              accept=".pdf"
+              accept=".pdf,.md"
               onChange={handleFileSelect}
               ref={fileInputRef}
             />
             {uploadData.file && (
               <small className="hint">
                 Selected: {uploadData.file.name} ({formatFileSize(uploadData.file.size)})
+                {uploadData.file.name.toLowerCase().endsWith('.md') && (
+                  <span className="file-type-badge"> - Markdown (header-based chunking)</span>
+                )}
               </small>
             )}
           </div>
@@ -1019,8 +1060,8 @@ const DocumentManager = () => {
           <div className="form-group">
             <label>Application *</label>
             <select
-              value={uploadData.application}
-              onChange={(e) => setUploadData({ ...uploadData, application: e.target.value })}
+              value={showCustomAppInput ? 'Other' : uploadData.application}
+              onChange={handleApplicationChange}
             >
               <option value="">Select application...</option>
               {applications.map(app => (
@@ -1032,12 +1073,32 @@ const DocumentManager = () => {
             </small>
           </div>
 
+          {showCustomAppInput && (
+            <div className="form-group">
+              <label>Custom Application Name *</label>
+              <input
+                type="text"
+                value={customApplication}
+                onChange={(e) => {
+                  setCustomApplication(e.target.value);
+                  setUploadData({ ...uploadData, application: e.target.value });
+                }}
+                placeholder="Enter new application name"
+              />
+              <small className="hint">
+                Enter a new application name. It will be available in the dropdown for future uploads.
+              </small>
+            </div>
+          )}
+
           <div className="button-group">
             <button
               className="btn-secondary"
               onClick={() => {
                 setShowUploadForm(false);
                 setUploadData({ file: null, title: '', application: '' });
+                setShowCustomAppInput(false);
+                setCustomApplication('');
               }}
             >
               Cancel

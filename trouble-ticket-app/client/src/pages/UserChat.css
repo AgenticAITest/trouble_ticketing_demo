@@ -400,16 +400,102 @@
 /* Input area */
 .input-area {
   display: flex;
+  flex-direction: column;
   gap: 12px;
   margin-top: 16px;
 }
 
-.input-area input {
+.input-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.input-row input {
   flex: 1;
 }
 
-.input-area button {
+.input-row button.btn-primary {
   padding: 10px 24px;
+}
+
+/* Image upload button */
+.image-upload-btn {
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  font-size: 18px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.image-upload-btn:hover:not(:disabled) {
+  background: #eff6ff;
+  border-color: var(--primary-color);
+}
+
+.image-upload-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Image preview in input area */
+.image-preview {
+  position: relative;
+  display: inline-block;
+  max-width: 200px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+}
+
+.image-preview img {
+  display: block;
+  max-width: 100%;
+  max-height: 150px;
+  object-fit: contain;
+}
+
+.remove-image-btn {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  color: white;
+  border: none;
+  border-radius: 50%;
+  font-size: 16px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.remove-image-btn:hover {
+  background: var(--error-color);
+}
+
+/* Image in message bubble */
+.message-image {
+  margin-bottom: 8px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.message-image img {
+  display: block;
+  max-width: 100%;
+  max-height: 300px;
+  object-fit: contain;
 }
 
 /* Responsive */
@@ -498,6 +584,21 @@
 .view-page-btn .page-source {
   font-size: 11px;
   color: var(--text-secondary);
+}
+
+/* Markdown section styling - no click action */
+.view-page-btn.markdown-section {
+  background: #f0fdf4;
+  border-color: #86efac;
+}
+
+.view-page-btn.markdown-section:hover {
+  background: #f0fdf4;
+  border-color: #86efac;
+}
+
+.view-page-btn.markdown-section .page-number {
+  color: #166534;
 }
 
 /* Page Viewer Modal */

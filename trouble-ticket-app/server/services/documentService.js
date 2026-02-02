@@ -292,48 +292,181 @@ function chunkByPages(pageTexts, options = {}) {
 }
 
 /**
- * Process a PDF document - extract and chunk with page tracking
- * @param {string} filePath - Path to PDF
+ * Extract text from a Markdown file
+ * @param {string} filePath - Path to the Markdown file
+ * @returns {Promise<{text: string}>}
+ */
+async function extractTextFromMarkdown(filePath) {
+  const text = fs.readFileSync(filePath, 'utf-8');
+  return { text };
+}
+
+/**
+ * Split markdown text into chunks by headers for FAQ-style documents
+ * @param {string} text - Markdown text
+ * @param {object} options - Chunking options
+ * @returns {Array<{content: string, index: number, tokenCount: number, header: string, sectionIndex: number}>}
+ */
+function chunkByHeaders(text, options = {}) {
+  const minContentLength = options.minContentLength || 50;
+
+  // Split by markdown headers (# ## ### etc.)
+  const headerRegex = /^(#{1,6})\s+(.+)$/gm;
+  const sections = [];
+  let lastIndex = 0;
+  let lastHeader = 'Introduction';
+  let lastHeaderLevel = 0;
+
+  // Find all headers and their positions
+  let match;
+  const matches = [];
+  while ((match = headerRegex.exec(text)) !== null) {
+    matches.push({
+      fullMatch: match[0],
+      level: match[1].length,
+      headerText: match[2].trim(),
+      index: match.index,
+      endIndex: match.index + match[0].length
+    });
+  }
+
+  // Process each section
+  for (let i = 0; i < matches.length; i++) {
+    const currentMatch = matches[i];
+    const nextMatch = matches[i + 1];
+
+    // Get content between this header and the next (or end of text)
+    const contentStart = currentMatch.endIndex;
+    const contentEnd = nextMatch ? nextMatch.index : text.length;
+    const content = text.slice(contentStart, contentEnd).trim();
+
+    if (content.length >= minContentLength) {
+      sections.push({
+        header: currentMatch.headerText,
+        headerLevel: currentMatch.level,
+        content: content
+      });
+    }
+  }
+
+  // Check for content before the first header
+  if (matches.length > 0 && matches[0].index > 0) {
+    const preamble = text.slice(0, matches[0].index).trim();
+    if (preamble.length >= minContentLength) {
+      sections.unshift({
+        header: 'Introduction',
+        headerLevel: 1,
+        content: preamble
+      });
+    }
+  } else if (matches.length === 0) {
+    // No headers found - treat entire document as one section
+    const cleanedText = cleanText(text);
+    if (cleanedText.length >= minContentLength) {
+      sections.push({
+        header: 'Document',
+        headerLevel: 1,
+        content: cleanedText
+      });
+    }
+  }
+
+  // Convert to chunk format
+  return sections.map((section, index) => ({
+    content: `## ${section.header}\n\n${section.content}`,
+    index: index,
+    tokenCount: estimateTokens(section.content),
+    header: section.header,
+    sectionIndex: index + 1,
+    // No pageNumber for markdown - use section index
+    pageNumber: null,
+    startPage: null,
+    endPage: null
+  }));
+}
+
+/**
+ * Process a document (PDF or Markdown) - extract and chunk with appropriate method
+ * @param {string} filePath - Path to document
  * @param {string} docId - Document ID
  * @param {object} options - Processing options
  * @returns {Promise<{chunks: Array, metadata: object}>}
  */
 async function processDocument(filePath, docId, options = {}) {
-  // Extract text with page-level tracking
-  const extracted = await extractTextFromPDF(filePath);
+  const ext = path.extname(filePath).toLowerCase();
+  const isMarkdown = ext === '.md';
 
-  // Use page-based chunking (one chunk per page) for accurate page numbers
   let chunks;
-  if (extracted.pageTexts && extracted.pageTexts.length > 0) {
-    chunks = chunkByPages(extracted.pageTexts, options);
-    console.log(`Chunked document by page: ${chunks.length} chunks from ${extracted.numPages} pages`);
+  let metadata;
+
+  if (isMarkdown) {
+    // Process Markdown file with header-based chunking
+    const extracted = await extractTextFromMarkdown(filePath);
+    chunks = chunkByHeaders(extracted.text, options);
+    console.log(`Chunked markdown by headers: ${chunks.length} sections`);
+
+    metadata = {
+      docId: docId,
+      filename: path.basename(filePath),
+      numPages: chunks.length, // Use section count as "pages" for markdown
+      totalChunks: chunks.length,
+      totalTokens: chunks.reduce((sum, c) => sum + c.tokenCount, 0),
+      extractedTextLength: extracted.text.length,
+      fileType: 'markdown'
+    };
+
+    // Add document metadata to each chunk
+    chunks = chunks.map(chunk => ({
+      ...chunk,
+      docId: docId,
+      metadata: {
+        source: path.basename(filePath),
+        numPages: metadata.numPages,
+        fileType: 'markdown',
+        header: chunk.header,
+        sectionIndex: chunk.sectionIndex
+      }
+    }));
   } else {
-    // Fallback to regular chunking if page texts not available
-    chunks = chunkText(extracted.text, options);
-  }
+    // Process PDF file with page-based chunking
+    const extracted = await extractTextFromPDF(filePath);
 
-  // Add document metadata to each chunk
-  const enrichedChunks = chunks.map(chunk => ({
-    ...chunk,
-    docId: docId,
-    metadata: {
-      source: path.basename(filePath),
-      numPages: extracted.numPages,
-      pdfInfo: extracted.info
+    // Use page-based chunking (one chunk per page) for accurate page numbers
+    if (extracted.pageTexts && extracted.pageTexts.length > 0) {
+      chunks = chunkByPages(extracted.pageTexts, options);
+      console.log(`Chunked document by page: ${chunks.length} chunks from ${extracted.numPages} pages`);
+    } else {
+      // Fallback to regular chunking if page texts not available
+      chunks = chunkText(extracted.text, options);
     }
-  }));
 
-  return {
-    chunks: enrichedChunks,
-    metadata: {
+    // Add document metadata to each chunk
+    chunks = chunks.map(chunk => ({
+      ...chunk,
+      docId: docId,
+      metadata: {
+        source: path.basename(filePath),
+        numPages: extracted.numPages,
+        pdfInfo: extracted.info,
+        fileType: 'pdf'
+      }
+    }));
+
+    metadata = {
       docId: docId,
       filename: path.basename(filePath),
       numPages: extracted.numPages,
       totalChunks: chunks.length,
       totalTokens: chunks.reduce((sum, c) => sum + c.tokenCount, 0),
       extractedTextLength: extracted.text.length,
-      pdfInfo: extracted.info
-    }
+      pdfInfo: extracted.info,
+      fileType: 'pdf'
+    };
+  }
+
+  return {
+    chunks: chunks,
+    metadata: metadata
   };
 }
 
@@ -621,10 +754,12 @@ function getImagesDirectory() {
 
 module.exports = {
   extractTextFromPDF,
+  extractTextFromMarkdown,
   cleanText,
   chunkText,
   chunkTextWithPages,
   chunkByPages,
+  chunkByHeaders,
   processDocument,
   deleteFile,
   estimateTokens,

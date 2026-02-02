@@ -25,14 +25,16 @@ const storage = multer.diskStorage({
   }
 });
 
-// File filter - only allow PDFs
+// File filter - allow PDFs and Markdown files
 const fileFilter = (req, file, cb) => {
-  const allowedTypes = ['application/pdf'];
+  const allowedTypes = ['application/pdf', 'text/markdown', 'text/x-markdown'];
+  const allowedExtensions = ['.pdf', '.md'];
+  const ext = path.extname(file.originalname).toLowerCase();
 
-  if (allowedTypes.includes(file.mimetype)) {
+  if (allowedTypes.includes(file.mimetype) || allowedExtensions.includes(ext)) {
     cb(null, true);
   } else {
-    cb(new Error('Only PDF files are allowed'), false);
+    cb(new Error('Only PDF and Markdown (.md) files are allowed'), false);
   }
 };
 
