@@ -395,6 +395,11 @@ router.post('/message', chatMessageRules, validateRequest, async (req, res) => {
       }
     }
 
+    // Show pages during troubleshooting OR when user explicitly asks for visuals
+    const visualKeywords = /screenshot|image|show me|picture|visual|how.*look|see.*page/i;
+    const userAskedForVisuals = visualKeywords.test(message);
+    const shouldShowPages = relatedPages.length > 0 && (conversationStatus === 'troubleshooting' || userAskedForVisuals);
+
     // Save AI response (human-readable version)
     // Include related_pages only if we're showing them to the user
     const pagesToStore = shouldShowPages ? relatedPages : null;
@@ -408,11 +413,6 @@ router.post('/message', chatMessageRules, validateRequest, async (req, res) => {
       read: 'TRUE',
       related_pages: pagesToStore ? JSON.stringify(pagesToStore) : ''
     });
-
-    // Show pages during troubleshooting OR when user explicitly asks for visuals
-    const visualKeywords = /screenshot|image|show me|picture|visual|how.*look|see.*page/i;
-    const userAskedForVisuals = visualKeywords.test(message);
-    const shouldShowPages = relatedPages.length > 0 && (conversationStatus === 'troubleshooting' || userAskedForVisuals);
 
     res.json({
       response: displayResponse,

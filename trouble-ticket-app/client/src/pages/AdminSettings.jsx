@@ -5,7 +5,7 @@ import './AdminSettings.css';
 const PROVIDERS = [
   { id: 'anthropic', name: 'Anthropic (Claude)', models: ['claude-sonnet-4-20250514', 'claude-3-haiku-20240307', 'claude-3-opus-20240229'] },
   { id: 'openai', name: 'OpenAI', models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'] },
-  { id: 'openrouter', name: 'OpenRouter', models: ['anthropic/claude-3-sonnet', 'openai/gpt-4o', 'google/gemini-pro'] },
+  { id: 'openrouter', name: 'OpenRouter', models: ['anthropic/claude-sonnet-4-20250514', 'anthropic/claude-3.5-sonnet', 'openai/gpt-4o', 'google/gemini-2.0-flash-001'] },
   { id: 'custom', name: 'Custom/Local', models: [] }
 ];
 
@@ -997,8 +997,8 @@ const DocumentManager = () => {
             >
               <option value="openai/gpt-4o-mini">OpenAI GPT-4o Mini (Recommended)</option>
               <option value="openai/gpt-4o">OpenAI GPT-4o</option>
-              <option value="anthropic/claude-3-haiku">Claude 3 Haiku</option>
-              <option value="anthropic/claude-3-sonnet">Claude 3 Sonnet</option>
+              <option value="anthropic/claude-3-haiku-20240307">Claude 3 Haiku</option>
+              <option value="anthropic/claude-3.5-sonnet">Claude 3.5 Sonnet</option>
             </select>
             <small className="hint">Model used to generate text descriptions of images.</small>
           </div>
