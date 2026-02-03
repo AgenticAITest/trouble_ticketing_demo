@@ -190,24 +190,57 @@ For PDF image processing, the app uses vision-capable models (via OpenRouter) to
 
 ## RAG (Retrieval Augmented Generation)
 
+### Supported Document Types
+
+| Type | Extension | Chunking Strategy | Retrieval Key |
+|------|-----------|-------------------|---------------|
+| **PDF** | `.pdf` | Page-based (~500 tokens/page) | Page number |
+| **Markdown** | `.md` | Header-based (by `#`, `##`, `###`) | Section header |
+
 ### Document Processing Pipeline
 
 ```
-PDF Upload
+Document Upload
     │
-    ├──► pdf-parse ──► Text Extraction ──► Chunking (~500 tokens)
-    │
-    └──► pdf-to-img + sharp ──► Page Images ──► Vision LLM ──► Image Descriptions
-                                                                      │
-                                                                      ▼
-                                                              Text Chunks
-                                                                      │
-                                                                      ▼
-                                                         Embedding Generation
-                                                                      │
-                                                                      ▼
-                                                         vectors.json (File Store)
+    ├─── PDF (.pdf) ────────────────────────────────────────────────────┐
+    │         │                                                         │
+    │         ├──► pdf-parse ──► Page Text Extraction                   │
+    │         │                         │                               │
+    │         │                         ▼                               │
+    │         │                  chunkByPages()                         │
+    │         │                  (one chunk per page)                   │
+    │         │                         │                               │
+    │         └──► pdf-to-img + sharp ──► Page Images ──► Vision LLM ──►│
+    │                                                                   │
+    └─── Markdown (.md) ────────────────────────────────────────────────┤
+              │                                                         │
+              ▼                                                         │
+       chunkByHeaders()                                                 │
+       (split by # ## ### headers)                                      │
+              │                                                         │
+              ▼                                                         ▼
+         Text Chunks ◄──────────────────────────────────────────── Text Chunks
+              │
+              ▼
+      Embedding Generation
+              │
+              ▼
+      vectors.json (File Store)
 ```
+
+### Chunking Strategies
+
+**PDF: Page-Based Chunking** (`chunkByPages`)
+- One chunk per PDF page for accurate page number references
+- Preserves page boundaries for "See page X" citations
+- Metadata includes: `pageNumber`, `startPage`, `endPage`
+
+**Markdown: Header-Based Chunking** (`chunkByHeaders`)
+- Splits document by markdown headers (`#`, `##`, `###`, etc.)
+- Ideal for FAQ-style documents and knowledge bases
+- Each section (header + content) becomes one chunk
+- Metadata includes: `header`, `sectionIndex`
+- Retrieval returns section title instead of page number
 
 ### PDF Processing Libraries
 
@@ -240,7 +273,11 @@ PDF Upload
       "metadata": {
         "type": "text|image",
         "docId": "doc123",
-        "chunkIndex": 0
+        "chunkIndex": 0,
+        "fileType": "pdf|markdown",
+        "pageNumber": 1,           // PDF only
+        "header": "Section Title", // Markdown only
+        "sectionIndex": 1          // Markdown only
       }
     }
   ],
@@ -266,6 +303,18 @@ PDF Upload
 2. Cosine similarity calculation against all stored chunks
 3. Return top 5 most similar chunks
 4. Inject chunks into LLM context as "Knowledge Base Documents"
+
+### Retrieval Response Format
+
+**For PDF documents:**
+- Returns page numbers for citation
+- Can display PDF page images to user
+- Example: "See page 5 of User Manual.pdf"
+
+**For Markdown documents:**
+- Returns section headers for citation
+- Text-only display (no images)
+- Example: "See section 'How to Reset Password' in FAQ.md"
 
 ---
 
@@ -306,8 +355,14 @@ All incoming request bodies are sanitized to prevent XSS:
 
 **Configuration:** `server/middleware/upload.js`
 - Stores files in `server/uploads/`
-- File naming: `doc-{timestamp}-{random}.pdf`
-- File size limits enforced
+- File naming: `doc-{timestamp}-{random}.{ext}`
+- File size limit: 10MB
+
+**Supported File Types:**
+| Type | MIME Types | Extension |
+|------|------------|-----------|
+| PDF | `application/pdf` | `.pdf` |
+| Markdown | `text/markdown`, `text/x-markdown` | `.md` |
 
 ---
 
