@@ -12,35 +12,110 @@ const SPREADSHEET_ID = process.env.GOOGLE_SPREADSHEET_ID;
 let serviceAccountAuth = null;
 let doc = null;
 let initialized = false;
+let lastActivityTime = Date.now();
+let initPromise = null; // Mutex to prevent concurrent initialization
+
+// Connection timeout threshold (5 minutes of idle = consider stale)
+const STALE_CONNECTION_THRESHOLD = 5 * 60 * 1000;
+
+/**
+ * Reset the connection (used when connection becomes stale)
+ */
+function resetConnection() {
+  initialized = false;
+  doc = null;
+  serviceAccountAuth = null;
+  initPromise = null;
+}
+
+/**
+ * Check if connection might be stale
+ */
+function isConnectionStale() {
+  return Date.now() - lastActivityTime > STALE_CONNECTION_THRESHOLD;
+}
+
+/**
+ * Retry wrapper with connection reset for stale connections
+ */
+async function withRetry(fn, retries = 2) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const result = await fn();
+      lastActivityTime = Date.now();
+      return result;
+    } catch (error) {
+      const isConnectionError =
+        error.code === 'ETIMEDOUT' ||
+        error.code === 'ECONNRESET' ||
+        error.code === 'ENOTFOUND' ||
+        error.message?.includes('timeout') ||
+        error.message?.includes('ETIMEDOUT');
+
+      if (isConnectionError && attempt < retries) {
+        console.warn(`Google Sheets connection error (attempt ${attempt + 1}/${retries + 1}), resetting connection...`);
+        resetConnection();
+        await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+        continue;
+      }
+      throw error;
+    }
+  }
+}
 
 /**
  * Initialize Google Sheets connection
+ * Uses a mutex (initPromise) to prevent concurrent initialization race conditions
  */
 async function initSheet() {
+  // Reset if connection might be stale
+  if (initialized && isConnectionStale()) {
+    console.log('Connection idle for too long, resetting...');
+    resetConnection();
+  }
+
+  // Return existing connection if valid
   if (initialized && doc) {
     return doc;
   }
 
-  if (!SPREADSHEET_ID) {
-    throw new Error('GOOGLE_SPREADSHEET_ID environment variable is required');
+  // If initialization is already in progress, wait for it
+  if (initPromise) {
+    return initPromise;
   }
 
-  if (!process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || !process.env.GOOGLE_PRIVATE_KEY) {
-    throw new Error('Google service account credentials are required');
+  // Start initialization and store the promise (mutex)
+  initPromise = (async () => {
+    if (!SPREADSHEET_ID) {
+      throw new Error('GOOGLE_SPREADSHEET_ID environment variable is required');
+    }
+
+    if (!process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || !process.env.GOOGLE_PRIVATE_KEY) {
+      throw new Error('Google service account credentials are required');
+    }
+
+    serviceAccountAuth = new JWT({
+      email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+      key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+
+    doc = new GoogleSpreadsheet(SPREADSHEET_ID, serviceAccountAuth);
+    await doc.loadInfo();
+    initialized = true;
+    lastActivityTime = Date.now();
+
+    console.log(`Connected to Google Sheet: ${doc.title}`);
+    return doc;
+  })();
+
+  try {
+    return await initPromise;
+  } catch (error) {
+    // Reset on failure so next attempt can try again
+    resetConnection();
+    throw error;
   }
-
-  serviceAccountAuth = new JWT({
-    email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-    key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-  });
-
-  doc = new GoogleSpreadsheet(SPREADSHEET_ID, serviceAccountAuth);
-  await doc.loadInfo();
-  initialized = true;
-
-  console.log(`Connected to Google Sheet: ${doc.title}`);
-  return doc;
 }
 
 /**
@@ -53,6 +128,26 @@ async function getSheet(sheetName) {
   if (!sheet) {
     throw new Error(`Sheet "${sheetName}" not found. Available sheets: ${Object.keys(doc.sheetsByTitle).join(', ')}`);
   }
+  return sheet;
+}
+
+/**
+ * Ensure required columns exist in a sheet
+ * Adds missing columns to the header row
+ */
+async function ensureColumns(sheetName, requiredColumns) {
+  const sheet = await getSheet(sheetName);
+  await sheet.loadHeaderRow();
+  const existingHeaders = sheet.headerValues || [];
+
+  const missingColumns = requiredColumns.filter(col => !existingHeaders.includes(col));
+
+  if (missingColumns.length > 0) {
+    const newHeaders = [...existingHeaders, ...missingColumns];
+    await sheet.setHeaderRow(newHeaders);
+    console.log(`Added missing columns to ${sheetName}: ${missingColumns.join(', ')}`);
+  }
+
   return sheet;
 }
 
@@ -154,59 +249,78 @@ async function updateTicket(ticketId, updates) {
 /**
  * Add a new message
  */
+// Track if message columns have been verified
+let messageColumnsVerified = false;
+
 async function addMessage(messageData) {
-  const sheet = await getSheet('message');
-  const row = await sheet.addRow({
-    message_id: messageData.message_id,
-    session_id: messageData.session_id,
-    ticket_id: messageData.ticket_id || '',
-    sender: messageData.sender,
-    content: messageData.content,
-    timestamp: messageData.timestamp || new Date().toISOString(),
-    read: messageData.read || 'FALSE',
-    related_pages: messageData.related_pages || ''
+  // Ensure required columns exist (only check once per session)
+  if (!messageColumnsVerified) {
+    await ensureColumns('message', [
+      'message_id', 'session_id', 'ticket_id', 'sender', 'content',
+      'timestamp', 'read', 'related_pages', 'image_url'
+    ]);
+    messageColumnsVerified = true;
+  }
+
+  return withRetry(async () => {
+    const sheet = await getSheet('message');
+    const row = await sheet.addRow({
+      message_id: messageData.message_id,
+      session_id: messageData.session_id,
+      ticket_id: messageData.ticket_id || '',
+      sender: messageData.sender,
+      content: messageData.content,
+      timestamp: messageData.timestamp || new Date().toISOString(),
+      read: messageData.read || 'FALSE',
+      related_pages: messageData.related_pages || '',
+      image_url: messageData.image_url || ''
+    });
+    return rowToObject(row);
   });
-  return rowToObject(row);
 }
 
 /**
  * Get all messages for a session
  */
 async function getMessagesBySession(sessionId) {
-  const sheet = await getSheet('message');
-  const rows = await sheet.getRows();
-  return rows
-    .filter(row => row.get('session_id') === sessionId)
-    .map(row => {
-      const message = rowToObject(row);
-      // Parse related_pages JSON if present
-      if (message.related_pages) {
-        try {
-          message.relatedPages = JSON.parse(message.related_pages);
-        } catch (e) {
+  return withRetry(async () => {
+    const sheet = await getSheet('message');
+    const rows = await sheet.getRows();
+    return rows
+      .filter(row => row.get('session_id') === sessionId)
+      .map(row => {
+        const message = rowToObject(row);
+        // Parse related_pages JSON if present
+        if (message.related_pages) {
+          try {
+            message.relatedPages = JSON.parse(message.related_pages);
+          } catch (e) {
+            message.relatedPages = null;
+          }
+        } else {
           message.relatedPages = null;
         }
-      } else {
-        message.relatedPages = null;
-      }
-      return message;
-    })
-    .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+        return message;
+      })
+      .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+  });
 }
 
 /**
  * Get unread messages from IT support for a session
  */
 async function getUnreadMessages(sessionId) {
-  const sheet = await getSheet('message');
-  const rows = await sheet.getRows();
-  return rows
-    .filter(row =>
-      row.get('session_id') === sessionId &&
-      row.get('read') === 'FALSE' &&
-      row.get('sender') === 'it_support'
-    )
-    .map(rowToObject);
+  return withRetry(async () => {
+    const sheet = await getSheet('message');
+    const rows = await sheet.getRows();
+    return rows
+      .filter(row =>
+        row.get('session_id') === sessionId &&
+        row.get('read') === 'FALSE' &&
+        row.get('sender') === 'it_support'
+      )
+      .map(rowToObject);
+  });
 }
 
 /**
@@ -334,9 +448,11 @@ async function findMatchingMockLog(application, errorPattern) {
  * Get all knowledge base documents
  */
 async function getKnowledgeBase() {
-  const sheet = await getSheet('knowledge_base');
-  const rows = await sheet.getRows();
-  return rows.map(rowToObject);
+  return withRetry(async () => {
+    const sheet = await getSheet('knowledge_base');
+    const rows = await sheet.getRows();
+    return rows.map(rowToObject);
+  });
 }
 
 /**
@@ -509,10 +625,12 @@ async function deleteDocument(docId) {
  * Get a single setting by key
  */
 async function getSetting(key) {
-  const sheet = await getSheet('settings');
-  const rows = await sheet.getRows();
-  const row = rows.find(r => r.get('setting_key') === key);
-  return row ? row.get('setting_value') : null;
+  return withRetry(async () => {
+    const sheet = await getSheet('settings');
+    const rows = await sheet.getRows();
+    const row = rows.find(r => r.get('setting_key') === key);
+    return row ? row.get('setting_value') : null;
+  });
 }
 
 /**

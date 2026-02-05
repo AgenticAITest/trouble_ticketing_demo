@@ -547,6 +547,58 @@
   flex-wrap: wrap;
 }
 
+/* Page Thumbnails - inline display of PDF pages */
+.related-pages-thumbnails {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.page-thumbnail-container {
+  cursor: pointer;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 2px solid var(--border-color);
+  background: white;
+  transition: all 0.2s;
+  max-width: 200px;
+}
+
+.page-thumbnail-container:hover {
+  border-color: var(--primary-color);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.2);
+  transform: translateY(-2px);
+}
+
+.page-thumbnail {
+  width: 100%;
+  height: auto;
+  max-height: 250px;
+  object-fit: contain;
+  display: block;
+  background: #f8f9fa;
+}
+
+.page-thumbnail-label {
+  padding: 8px;
+  background: linear-gradient(to top, rgba(0,0,0,0.7), transparent);
+  color: white;
+  font-size: 12px;
+  font-weight: 500;
+  margin-top: -40px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.page-thumbnail-label .page-app {
+  font-size: 10px;
+  opacity: 0.8;
+  font-weight: normal;
+}
+
 .view-page-btn {
   display: flex;
   align-items: center;

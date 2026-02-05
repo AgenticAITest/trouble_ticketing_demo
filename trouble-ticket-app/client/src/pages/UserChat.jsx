@@ -52,7 +52,12 @@ const UserChat = () => {
     const loadMessages = async () => {
       try {
         const history = await chatApi.getSession(sessionId);
-        setMessages(history);
+        // Map image_url to image for display consistency
+        const mappedHistory = history.map(msg => ({
+          ...msg,
+          image: msg.image_url || null
+        }));
+        setMessages(mappedHistory);
         // Mark messages as read when viewing this session
         markSessionAsRead(sessionId);
       } catch (error) {
@@ -105,6 +110,20 @@ const UserChat = () => {
       }
 
       const response = await chatApi.sendMessage(sessionId, sentMessage, imageId);
+
+      // Update the user message with the persisted image URL (replacing blob URL)
+      if (response.savedImageUrl && imageToSend) {
+        setMessages(prev => prev.map((msg, idx) => {
+          // Find the user message we just added (second to last, before AI response)
+          if (idx === prev.length - 1 && msg.sender === 'user' && msg.image) {
+            // Revoke the temporary blob URL
+            URL.revokeObjectURL(msg.image);
+            return { ...msg, image: response.savedImageUrl };
+          }
+          return msg;
+        }));
+      }
+
       const aiMessage = {
         sender: 'ai',
         content: response.response,
@@ -355,31 +374,47 @@ const UserChat = () => {
                   {msg.relatedPages && msg.relatedPages.length > 0 && (
                     <div className="related-pages">
                       <div className="related-pages-header">Related Documentation:</div>
+                      {/* Show PDF page thumbnails inline */}
+                      <div className="related-pages-thumbnails">
+                        {msg.relatedPages.slice(0, 3).filter(page => page.pageNumber && page.docId).map((page, pageIdx) => (
+                          <div
+                            key={pageIdx}
+                            className="page-thumbnail-container"
+                            onClick={() => handleViewPage(page)}
+                            title={`Click to enlarge - Page ${page.pageNumber}${page.application ? ` from ${page.application}` : ''}`}
+                          >
+                            <img
+                              src={`/api/documents/${page.docId}/page/${page.pageNumber}`}
+                              alt={`Page ${page.pageNumber}`}
+                              className="page-thumbnail"
+                              loading="lazy"
+                            />
+                            <div className="page-thumbnail-label">
+                              Page {page.pageNumber}
+                              {page.application && <span className="page-app">{page.application}</span>}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                      {/* Show markdown sections as buttons */}
                       <div className="related-pages-list">
-                        {msg.relatedPages.slice(0, 3).map((page, pageIdx) => {
-                          // Check if this is a markdown section (no pageNumber or pageNumber is null)
-                          const isMarkdown = !page.pageNumber && page.header;
-                          return (
-                            <button
-                              key={pageIdx}
-                              className={`view-page-btn ${isMarkdown ? 'markdown-section' : ''}`}
-                              onClick={() => !isMarkdown && handleViewPage(page)}
-                              title={isMarkdown ? `Section: ${page.header}` : `View page ${page.pageNumber} from ${page.source || page.application}`}
-                              disabled={isMarkdown}
-                              style={isMarkdown ? { cursor: 'default' } : {}}
-                            >
-                              <span className="page-icon">{isMarkdown ? '📝' : '📄'}</span>
-                              <span className="page-info">
-                                <span className="page-number">
-                                  {isMarkdown ? `Section: ${page.header}` : `Page ${page.pageNumber}`}
-                                </span>
-                                {page.application && (
-                                  <span className="page-source">{page.application}</span>
-                                )}
-                              </span>
-                            </button>
-                          );
-                        })}
+                        {msg.relatedPages.slice(0, 3).filter(page => !page.pageNumber && page.header).map((page, pageIdx) => (
+                          <button
+                            key={pageIdx}
+                            className="view-page-btn markdown-section"
+                            disabled
+                            style={{ cursor: 'default' }}
+                            title={`Section: ${page.header}`}
+                          >
+                            <span className="page-icon">📝</span>
+                            <span className="page-info">
+                              <span className="page-number">Section: {page.header}</span>
+                              {page.application && (
+                                <span className="page-source">{page.application}</span>
+                              )}
+                            </span>
+                          </button>
+                        ))}
                       </div>
                     </div>
                   )}

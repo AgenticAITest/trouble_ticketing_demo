@@ -8,6 +8,8 @@ AI-powered IT support chatbot that helps employees troubleshoot issues with comp
 
 ## Development Commands
 
+**Requires Node.js >= 18.0.0**
+
 All commands are run from within `trouble-ticket-app/`:
 
 ```bash
@@ -47,6 +49,7 @@ Authentication uses SHA-256 hashed passwords stored in Google Sheets settings.
 The LLM must respond with strict JSON: `{ response, application, status, ticket_data }`
 
 ### Key Backend Components
+- `server/routes/chat.js` - Main chat endpoint, orchestrates LLM calls and RAG search
 - `server/services/llmService.js` - Multi-provider LLM integration (Anthropic, OpenAI, OpenRouter, custom) with retry logic
 - `server/services/googleSheets.js` - All database CRUD operations
 - `server/services/vectorService.js` - Multi-provider embeddings with file-based vector store
@@ -98,13 +101,41 @@ Configurable in Admin Settings → Embeddings:
 - `DELETE /api/documents/:docId` - Delete document (admin only)
 - `POST /api/documents/search` - Semantic search (public)
 
+## System Dependencies
+
+### Poppler (Required for PDF page rendering)
+
+Poppler is required for proper PDF page rendering with correct font display. Without it, the app falls back to `pdf-to-img` which has poor font rendering.
+
+**Windows Installation:**
+1. Download from: https://github.com/oschwartz10612/poppler-windows/releases
+2. Extract to `C:\poppler\` (e.g., `C:\poppler\poppler-24.08.0\`)
+3. The app automatically detects Poppler in common locations
+
+Or via package manager:
+```bash
+choco install poppler
+# or
+winget install poppler
+```
+
+**macOS:**
+```bash
+brew install poppler
+```
+
+**Linux:**
+```bash
+sudo apt-get install poppler-utils
+```
+
 ## Environment Setup
 
 Copy `server/.env.example` to `server/.env` and configure:
 - Google Sheets credentials (service account email + private key)
 - `ENCRYPTION_KEY` - exactly 32 characters for API key encryption
 - `GOOGLE_SPREADSHEET_ID` - the spreadsheet ID from the URL
-- Optional embedding provider keys: `OPENAI_API_KEY`, `COHERE_API_KEY`, `JINA_API_KEY`
+- Optional embedding provider keys: `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `COHERE_API_KEY`, `JINA_API_KEY`
 - Optional local embeddings: `OLLAMA_URL` (default: `http://localhost:11434`)
 
 Generate encryption key:

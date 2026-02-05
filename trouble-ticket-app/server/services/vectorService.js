@@ -106,9 +106,10 @@ async function getEmbeddingConfig() {
     const storedKey = await getSetting('api_key');
     if (storedKey) {
       try {
-        apiKey = decrypt(storedKey) || storedKey;
-      } catch {
-        apiKey = storedKey;
+        apiKey = decrypt(storedKey) || null;
+      } catch (e) {
+        console.error('Decryption error:', e.message);
+        apiKey = null; // Fall back to env variables
       }
     }
   } else {
@@ -116,9 +117,10 @@ async function getEmbeddingConfig() {
     const embeddingKey = await getSetting('embedding_api_key');
     if (embeddingKey) {
       try {
-        apiKey = decrypt(embeddingKey) || embeddingKey;
-      } catch {
-        apiKey = embeddingKey;
+        apiKey = decrypt(embeddingKey) || null;
+      } catch (e) {
+        console.error('Decryption error:', e.message);
+        apiKey = null; // Fall back to env variables
       }
     }
   }

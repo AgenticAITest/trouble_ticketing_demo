@@ -61,20 +61,34 @@ async function getProviderConfig() {
   const model = await getSetting('api_model') || PROVIDERS[provider]?.defaultModel;
   const baseUrl = await getSetting('api_base_url');
 
-  // Try to decrypt the key, if it fails assume it's not encrypted
+  // Try to decrypt the key, if it fails fall back to environment variables
   let apiKey = null;
   if (storedKey) {
     try {
       const decrypted = decrypt(storedKey);
-      apiKey = decrypted || storedKey; // Use decrypted if successful, otherwise use as-is
-    } catch {
-      apiKey = storedKey; // Not encrypted, use directly
+      apiKey = decrypted || null;
+    } catch (e) {
+      console.error('Decryption error:', e.message);
+      // Decryption failed - key was encrypted with different key, fall back to env
+      apiKey = null;
     }
   }
 
-  // Fallback to environment variable
+  // Fallback to environment variable based on provider
   if (!apiKey) {
-    apiKey = process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY;
+    switch (provider) {
+      case 'openrouter':
+        apiKey = process.env.OPENROUTER_API_KEY;
+        break;
+      case 'openai':
+        apiKey = process.env.OPENAI_API_KEY;
+        break;
+      case 'anthropic':
+        apiKey = process.env.ANTHROPIC_API_KEY;
+        break;
+      default:
+        apiKey = process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY || process.env.OPENROUTER_API_KEY;
+    }
   }
 
   return { provider, apiKey, model, baseUrl };

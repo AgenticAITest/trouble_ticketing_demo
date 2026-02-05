@@ -14,17 +14,38 @@ const llmService = require('../services/llmService');
 const vectorService = require('../services/vectorService');
 const { getSystemPrompt } = require('../prompts/systemPrompt');
 
-// Configure image upload storage
+// Configure image upload storage - persist to disk for session history
 const CHAT_IMAGES_DIR = path.join(__dirname, '..', 'data', 'chat-images');
 if (!fs.existsSync(CHAT_IMAGES_DIR)) {
   fs.mkdirSync(CHAT_IMAGES_DIR, { recursive: true });
 }
 
-// In-memory storage for uploaded images (cleared after use)
+// Track uploaded images temporarily until they're associated with a message
 const uploadedImages = new Map();
 
-// Multer config for image uploads
-const imageStorage = multer.memoryStorage();
+// Helper to get file extension from mimetype
+function getExtension(mimetype) {
+  const extensions = {
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/gif': '.gif',
+    'image/webp': '.webp'
+  };
+  return extensions[mimetype] || '.jpg';
+}
+
+// Multer config for image uploads - use disk storage for persistence
+const imageStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, CHAT_IMAGES_DIR);
+  },
+  filename: (req, file, cb) => {
+    const imageId = `img_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const ext = getExtension(file.mimetype);
+    cb(null, imageId + ext);
+  }
+});
+
 const imageUpload = multer({
   storage: imageStorage,
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
@@ -80,6 +101,7 @@ function extractTicketDataLegacy(response) {
  * POST /api/chat/upload-image
  * Upload an image for troubleshooting
  * Returns an imageId that can be used with the message endpoint
+ * Images are persisted to disk for session history
  */
 router.post('/upload-image', imageUpload.single('image'), async (req, res) => {
   try {
@@ -87,31 +109,36 @@ router.post('/upload-image', imageUpload.single('image'), async (req, res) => {
       return res.status(400).json({ error: 'No image uploaded' });
     }
 
-    const imageId = `img_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    // Get imageId from the saved filename (without extension)
+    const imageId = path.basename(req.file.filename, path.extname(req.file.filename));
 
-    // Store image in memory temporarily (will be cleared after use)
+    // Track the uploaded image temporarily until it's used in a message
     uploadedImages.set(imageId, {
-      buffer: req.file.buffer,
+      filename: req.file.filename,
+      filepath: req.file.path,
       mimetype: req.file.mimetype,
       originalname: req.file.originalname,
       uploadedAt: Date.now()
     });
 
-    // Clean up old images (older than 10 minutes)
-    const TEN_MINUTES = 10 * 60 * 1000;
+    // Clean up orphaned images (older than 30 minutes and not used)
+    const THIRTY_MINUTES = 30 * 60 * 1000;
     for (const [id, img] of uploadedImages.entries()) {
-      if (Date.now() - img.uploadedAt > TEN_MINUTES) {
+      if (Date.now() - img.uploadedAt > THIRTY_MINUTES) {
         uploadedImages.delete(id);
+        // Note: We don't delete the file since it might have been used
       }
     }
 
-    console.log(`Image uploaded: ${imageId} (${req.file.mimetype}, ${req.file.buffer.length} bytes)`);
+    console.log(`Image uploaded and saved: ${req.file.filename} (${req.file.mimetype}, ${req.file.size} bytes)`);
 
     res.json({
       imageId: imageId,
       filename: req.file.originalname,
-      size: req.file.buffer.length,
-      mimetype: req.file.mimetype
+      size: req.file.size,
+      mimetype: req.file.mimetype,
+      // Return URL for immediate preview
+      imageUrl: `/api/chat/images/${req.file.filename}`
     });
   } catch (error) {
     console.error('Image upload error:', error);
@@ -130,16 +157,24 @@ router.post('/message', chatMessageRules, validateRequest, async (req, res) => {
 
     // Check if there's an image to process
     let imageData = null;
+    let savedImageUrl = null;
     if (imageId && uploadedImages.has(imageId)) {
       const img = uploadedImages.get(imageId);
+
+      // Read image from disk for LLM processing
+      const imageBuffer = fs.readFileSync(img.filepath);
       imageData = {
-        base64: img.buffer.toString('base64'),
+        base64: imageBuffer.toString('base64'),
         mimetype: img.mimetype,
         filename: img.originalname
       };
-      // Remove from memory after retrieval
+
+      // Keep the URL for storing with the message (image persists on disk)
+      savedImageUrl = `/api/chat/images/${img.filename}`;
+
+      // Remove from tracking map (file stays on disk)
       uploadedImages.delete(imageId);
-      console.log(`Processing message with image: ${imageId}`);
+      console.log(`Processing message with image: ${img.filename}`);
     }
 
     // Get conversation history
@@ -243,7 +278,7 @@ router.post('/message', chatMessageRules, validateRequest, async (req, res) => {
     // Build system prompt with combined context
     const systemPrompt = getSystemPrompt(combinedContext, customPrompt || null);
 
-    // Save user message
+    // Save user message (with image URL if present)
     await googleSheets.addMessage({
       message_id: uuidv4(),
       session_id: sessionId,
@@ -251,7 +286,8 @@ router.post('/message', chatMessageRules, validateRequest, async (req, res) => {
       sender: 'user',
       content: message,
       timestamp: new Date().toISOString(),
-      read: 'TRUE'
+      read: 'TRUE',
+      image_url: savedImageUrl || ''
     });
 
     // Get AI response (with or without image)
@@ -395,10 +431,9 @@ router.post('/message', chatMessageRules, validateRequest, async (req, res) => {
       }
     }
 
-    // Show pages during troubleshooting OR when user explicitly asks for visuals
-    const visualKeywords = /screenshot|image|show me|picture|visual|how.*look|see.*page/i;
-    const userAskedForVisuals = visualKeywords.test(message);
-    const shouldShowPages = relatedPages.length > 0 && (conversationStatus === 'troubleshooting' || userAskedForVisuals);
+    // Only show pages when the AI explicitly requests it via show_documentation flag
+    // This prevents unwanted documentation display (e.g., when user uploads their own screenshot)
+    const shouldShowPages = parsedResponse?.show_documentation === true && relatedPages.length > 0;
 
     // Save AI response (human-readable version)
     // Include related_pages only if we're showing them to the user
@@ -420,7 +455,8 @@ router.post('/message', chatMessageRules, validateRequest, async (req, res) => {
       ticketsClosed: ticketsClosed,
       status: conversationStatus,
       application: parsedResponse?.application || null,
-      relatedPages: shouldShowPages ? relatedPages : null
+      relatedPages: shouldShowPages ? relatedPages : null,
+      savedImageUrl: savedImageUrl || null
     });
   } catch (error) {
     console.error('Chat error:', error);
@@ -477,6 +513,43 @@ router.post('/mark-read', async (req, res) => {
   } catch (error) {
     console.error('Mark read error:', error);
     res.status(500).json({ error: 'Failed to mark as read' });
+  }
+});
+
+/**
+ * GET /api/chat/images/:filename
+ * Serve saved chat images
+ */
+router.get('/images/:filename', (req, res) => {
+  try {
+    const { filename } = req.params;
+
+    // Sanitize filename to prevent directory traversal
+    const sanitizedFilename = path.basename(filename);
+    const imagePath = path.join(CHAT_IMAGES_DIR, sanitizedFilename);
+
+    // Check if file exists
+    if (!fs.existsSync(imagePath)) {
+      return res.status(404).json({ error: 'Image not found' });
+    }
+
+    // Determine content type from extension
+    const ext = path.extname(sanitizedFilename).toLowerCase();
+    const contentTypes = {
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp'
+    };
+    const contentType = contentTypes[ext] || 'image/jpeg';
+
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'public, max-age=31536000'); // Cache for 1 year
+    res.sendFile(imagePath);
+  } catch (error) {
+    console.error('Error serving chat image:', error);
+    res.status(500).json({ error: 'Failed to serve image' });
   }
 });
 

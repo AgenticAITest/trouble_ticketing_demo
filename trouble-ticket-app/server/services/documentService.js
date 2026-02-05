@@ -538,6 +538,7 @@ async function renderPDFPage(docId, pageNumber) {
   // Check for pdftoppm in common locations
   const pdftoppmPaths = [
     'pdftoppm',
+    'C:\\poppler\\poppler-24.08.0\\Library\\bin\\pdftoppm.exe',
     'C:\\poppler\\poppler-25.12.0\\Library\\bin\\pdftoppm.exe',
     'C:\\poppler\\Library\\bin\\pdftoppm.exe',
   ];
